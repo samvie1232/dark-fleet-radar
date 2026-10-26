@@ -61,8 +61,14 @@ def alerts(limit: int = 20) -> int:
         print("La tabla gold.alerts todavía no existe: el job de detecciones no ha arrancado.")
         print("Revisa: docker compose logs flink-job --tail 40")
         return 1
-    rows = catalog.load_table("gold.alerts").scan().to_arrow()  # noqa: F841 (lo lee duckdb)
+    raw = catalog.load_table("gold.alerts").scan().to_arrow()  # noqa: F841 (lo lee duckdb)
     con = duckdb.connect()
+    # gold.alerts es de solo agregar: si el job se reprocesa (por ejemplo, al subir de versión)
+    # la misma alerta queda dos veces con el mismo alert_id. Se cuenta una vez, la más reciente.
+    rows = con.sql(  # noqa: F841 (lo lee duckdb)
+        "SELECT * FROM raw QUALIFY "
+        "ROW_NUMBER() OVER (PARTITION BY alert_id ORDER BY detected_at DESC) = 1"
+    )
     print(
         con.sql(
             "SELECT alert_type, COUNT(*) AS alertas, COUNT(DISTINCT mmsi) AS barcos, "
