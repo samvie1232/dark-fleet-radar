@@ -49,7 +49,7 @@ services:
       KAFKA_SCHEMAREGISTRY_ENABLED: "true"
       KAFKA_SCHEMAREGISTRY_URLS: http://redpanda:8081
     ports:
-      - "8080:8080"     # http://localhost:8080
+      - "${CONSOLE_PORT:-8090}:8080"   # http://localhost:8090 (8080 suele estar ocupado por Airflow)
 
   producer:
     build: ./producer
@@ -62,7 +62,7 @@ services:
     volumes:
       - ./data:/data
     ports:
-      - "8000:8000"     # métricas Prometheus: http://localhost:8000/metrics
+      - "${METRICS_HOST_PORT:-8000}:8000"   # métricas Prometheus: http://localhost:8000/metrics
     restart: unless-stopped
 
 volumes:
