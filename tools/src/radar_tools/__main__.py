@@ -1,4 +1,7 @@
-"""python -m radar_tools [init-storage | load-sanctions | summary | verify | alerts]"""
+"""python -m radar_tools COMANDO
+
+COMANDO: init-storage | load-reference | load-sanctions | summary | verify | alerts
+"""
 
 from __future__ import annotations
 
@@ -81,6 +84,12 @@ def main(argv: list[str]) -> int:
 
         ensure_bucket()
         return 0
+    if cmd == "load-reference":
+        from . import geo, sanctions
+
+        ports, cables = geo.load(sanctions.PG_DSN)
+        print(f"{ports} celdas de puertos y {cables} celdas de cables cargadas en Postgres")
+        return sanctions.load()
     if cmd == "load-sanctions":
         from .sanctions import load
 
