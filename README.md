@@ -33,7 +33,7 @@ docker compose up -d --build
 docker compose logs -f producer
 ```
 
-- Consola de Redpanda (topics y mensajes): http://localhost:8080
+- Consola de Redpanda (topics y mensajes): http://localhost:8090 (cámbialo con `CONSOLE_PORT` en `.env`)
 - Métricas del productor: http://localhost:8000/metrics
 - Grabaciones: `data/raw/`
 
