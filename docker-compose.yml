@@ -221,6 +221,8 @@ services:
     profiles: ["tools"]
     depends_on:
       iceberg-rest: { condition: service_healthy }
+    volumes:
+      - ./reports:/reports   # tools evaluate deja aquí evaluation.md y evaluation.json
 
   # ---------- Paso 4: monitoreo y tablero ----------
 

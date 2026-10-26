@@ -6,12 +6,12 @@ docker compose --profile tools run --rm tools verify
 
 Write-Host "2) Matando el TaskManager (como si se cayera la maquina)..."
 docker compose kill flink-taskmanager
-Start-Sleep -Seconds 20
+docker compose --profile tools run --rm tools watch-flink 20
 Write-Host "3) Levantandolo de nuevo; Flink retoma desde el ultimo checkpoint"
 docker compose start flink-taskmanager
 
 Write-Host "4) Esperando 2 checkpoints nuevos (~2 min)..."
-Start-Sleep -Seconds 150
+docker compose --profile tools run --rm tools watch-flink 150
 
 Write-Host "5) Verificacion final"
 docker compose --profile tools run --rm tools verify

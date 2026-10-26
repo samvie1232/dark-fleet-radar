@@ -1,6 +1,7 @@
 """python -m radar_tools COMANDO
 
-COMANDO: init-storage | load-reference | load-sanctions | summary | verify | alerts
+COMANDO: init-storage | load-reference | load-sanctions | summary | verify | alerts |
+         eval-reset | evaluate | watch-flink [segundos]
 """
 
 from __future__ import annotations
@@ -101,6 +102,20 @@ def main(argv: list[str]) -> int:
         return verify()
     if cmd == "alerts":
         return alerts()
+    if cmd == "eval-reset":
+        from . import evaluate, sanctions
+
+        evaluate.reset(sanctions.PG_DSN)
+        print("Listo para evaluar: topic ais.eval y tablas *_eval vacías.")
+        return 0
+    if cmd == "evaluate":
+        from . import evaluate, sanctions
+
+        return evaluate.run(sanctions.PG_DSN)
+    if cmd == "watch-flink":
+        from . import flinkwatch
+
+        return flinkwatch.watch(int(argv[1]) if len(argv) > 1 else 150)
     print(__doc__)
     return 2
 

@@ -4,3 +4,4 @@ psycopg[binary]==3.2.6
 pyarrow==19.0.1
 pyiceberg==0.9.1
 h3==4.1.2
+aiokafka==0.12.0
