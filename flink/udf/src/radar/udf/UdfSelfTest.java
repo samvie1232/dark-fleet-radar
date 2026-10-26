@@ -38,6 +38,20 @@ public class UdfSelfTest {
         check("H3 posición no disponible (91/181)", h3.eval(91.0, 181.0, 7) == null);
         check("H3 nulos", h3.eval(null, 12.0, 7) == null);
 
+        // H3Disk: la celda y sus 6 vecinas; incluye la celda de un punto a 1 km al otro lado del borde.
+        H3Disk disk = new H3Disk();
+        java.util.List<String> ring = disk.cells(57.0, 18.0, 6, 1);
+        check("H3 disco k=1 tiene 7 celdas", ring.size() == 7);
+        check("H3 disco incluye la celda propia", ring.contains(h3.eval(57.0, 18.0, 6)));
+        boolean neighbours = true;
+        for (int i = 0; i < 360; i += 15) {
+            double r = Math.toRadians(i);
+            double lat = 57.0 + Math.cos(r) / 111.32, lon = 18.0 + Math.sin(r) / (111.32 * Math.cos(Math.toRadians(57)));
+            neighbours &= ring.contains(h3.eval(lat, lon, 6));
+        }
+        check("H3 disco cubre todo punto a 1 km", neighbours);
+        check("H3 disco nulos", disk.cells(null, 1.0, 6, 1).isEmpty());
+
         // EpochMillis
         check("epoch millis", new EpochMillis().eval(java.time.Instant.parse("2026-10-26T15:00:00.123Z")) == 1793026800123L);
         check("epoch millis nulo", new EpochMillis().eval(null) == null);

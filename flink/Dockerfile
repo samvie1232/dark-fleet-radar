@@ -35,6 +35,6 @@ RUN cd /opt/flink/lib && \
 
 COPY --from=udf /build/radar-udf.jar /opt/flink/lib/radar-udf.jar
 COPY sql/ /opt/sql/
-COPY submit.sh /opt/submit.sh
+COPY submit.sh evaluate.sh /opt/
 # Quita \r por si el repo se clonó en Windows con saltos de línea CRLF.
-RUN sed -i 's/\r$//' /opt/submit.sh /opt/sql/*.sql && chmod +x /opt/submit.sh && mkdir -p /flink-data && chown flink:flink /flink-data
+RUN sed -i 's/\r$//' /opt/submit.sh /opt/evaluate.sh /opt/sql/*.sql && chmod +x /opt/submit.sh /opt/evaluate.sh && mkdir -p /flink-data && chown flink:flink /flink-data

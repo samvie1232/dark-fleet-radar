@@ -5,9 +5,9 @@
 --                     apagones de señal, encuentros en alta mar y merodeo sobre cables
 -- Va separado del job de ingesta para poder cambiar reglas sin tocar el estado de bronze/silver.
 
-SET 'pipeline.name' = 'dark-fleet-radar-detections-v3';
+SET 'pipeline.name' = 'dark-fleet-radar-detections-v4';
 SET 'parallelism.default' = '1';
-SET 'state.checkpoints.dir' = 'file:///flink-data/checkpoints-detections-v3';
+SET 'state.checkpoints.dir' = 'file:///flink-data/checkpoints-detections-v4';
 SET 'table.local-time-zone' = 'UTC';
 SET 'table.exec.source.idle-timeout' = '30 s';
 -- El estado por barco (última posición, último reporte por IMO) se olvida tras 30 días.
@@ -18,6 +18,7 @@ CREATE TEMPORARY SYSTEM FUNCTION haversine_km AS 'radar.udf.HaversineKm';
 CREATE TEMPORARY SYSTEM FUNCTION implied_speed_kn AS 'radar.udf.ImpliedSpeedKnots';
 CREATE TEMPORARY SYSTEM FUNCTION imo_valid AS 'radar.udf.ImoValid';
 CREATE TEMPORARY SYSTEM FUNCTION epoch_ms AS 'radar.udf.EpochMillis';
+CREATE TEMPORARY SYSTEM FUNCTION h3_disk AS 'radar.udf.H3Disk';
 
 CREATE CATALOG lake WITH (
   'type' = 'iceberg',
@@ -162,7 +163,30 @@ CREATE TEMPORARY TABLE coverage_pg (
   'lookup.cache' = 'PARTIAL',
   'lookup.partial-cache.expire-after-write' = '1 h',
   'lookup.partial-cache.max-rows' = '100000',
-  'lookup.partial-cache.cache-missing-key' = 'false'
+  'lookup.partial-cache.cache-missing-key' = 'false',
+  -- Escribe cada hora cerrada de inmediato: los apagones la consultan apenas se cierra.
+  'sink.buffer-flush.max-rows' = '1'
+);
+
+-- Lo mismo por zona (H3 res 5, unos 250 km²): la usan los apagones. Una celda r7 (5 km²) en mar
+-- abierto casi nunca tiene a otro barco en la misma hora, así que la cobertura se mira por zona.
+CREATE TEMPORARY TABLE coverage_zone_pg (
+  h3_r5        STRING,
+  window_start TIMESTAMP(3),
+  messages     BIGINT,
+  vessels      BIGINT,
+  PRIMARY KEY (h3_r5, window_start) NOT ENFORCED
+) WITH (
+  'connector' = 'jdbc',
+  'url' = 'jdbc:postgresql://postgres:5432/radar',
+  'table-name' = 'coverage_zone_hourly',
+  'username' = 'radar',
+  'password' = 'radar',
+  'lookup.cache' = 'PARTIAL',
+  'lookup.partial-cache.expire-after-write' = '1 h',
+  'lookup.partial-cache.max-rows' = '100000',
+  'lookup.partial-cache.cache-missing-key' = 'false',
+  'sink.buffer-flush.max-rows' = '1'
 );
 
 -- Copia de las alertas en Postgres para Grafana (upsert por alert_id).
@@ -394,8 +418,19 @@ FROM (
 WHERE h3_r7 IS NOT NULL
 GROUP BY window_start, window_end, h3_r7;
 
+INSERT INTO coverage_zone_pg
+SELECT h3_r5, CAST(window_start AS TIMESTAMP(3)), COUNT(*), COUNT(DISTINCT mmsi)
+FROM (
+  SELECT window_start, window_end, mmsi, h3_cell(lat, lon, 5) AS h3_r5
+  FROM TABLE(TUMBLE(TABLE kafka_ais, DESCRIPTOR(event_ts), INTERVAL '1' HOUR))
+  WHERE message_type IN ('PositionReport', 'StandardClassBPositionReport', 'ExtendedClassBPositionReport')
+    AND lat BETWEEN -90 AND 90 AND lon BETWEEN -180 AND 180 AND NOT (lat = 0 AND lon = 0)
+)
+WHERE h3_r5 IS NOT NULL
+GROUP BY window_start, window_end, h3_r5;
+
 -- 4. Apagón de señal: un barco deja de emitir 2 horas o más fuera de puerto, y en la hora central
---    del silencio se oía a otros barcos en la misma celda. Si no se oía a nadie, el silencio
+--    del silencio se oía a otros barcos en la misma zona (H3 res 5). Si no se oía a nadie, el silencio
 --    puede ser de cobertura (o de nuestro propio receptor apagado) y no se alerta.
 INSERT INTO lake.gold.alerts
 SELECT
@@ -417,6 +452,7 @@ FROM (
   SELECT *,
          h3_cell(prev_lat, prev_lon, 7) AS prev_h3,
          h3_cell(prev_lat, prev_lon, 6) AS prev_h3_r6,
+         h3_cell(prev_lat, prev_lon, 5) AS prev_h3_r5,
          (epoch_ms(event_time) - prev_ms) / 3600000.0 AS gap_h,
          -- Hora que contiene el punto medio del silencio: con 2 h o más cae entera dentro de él.
          CAST(FLOOR(TO_TIMESTAMP_LTZ((prev_ms + epoch_ms(event_time)) / 2, 3) TO HOUR)
@@ -437,13 +473,17 @@ FROM (
   WHERE n = 2 AND epoch_ms(event_time) - prev_ms >= 2 * 3600 * 1000
 ) AS g
 LEFT JOIN port_zone FOR SYSTEM_TIME AS OF g.proc_time AS p ON g.prev_h3_r6 = p.h3_r6
-JOIN coverage_pg FOR SYSTEM_TIME AS OF g.proc_time AS c
-  ON g.prev_h3 = c.h3_r7 AND g.mid_hour = c.window_start
+JOIN coverage_zone_pg FOR SYSTEM_TIME AS OF g.proc_time AS c
+  ON g.prev_h3_r5 = c.h3_r5 AND g.mid_hour = c.window_start
 WHERE p.h3_r6 IS NULL AND c.vessels >= 2;
 
 -- 5. Encuentro en alta mar (posible transferencia barco a barco): dos barcos casi quietos
 --    (< 2 nudos, sin estar amarrados) fuera de puerto, a menos de 1 km entre sí, durante al menos
 --    90 minutos de una ventana de 2 horas. Un trasvase dura horas, así que alerta en cada ventana.
+--    Los pares se buscan por celda H3 res 6 (unos 3 km de lado) y sus vecinas: dos barcos a menos
+--    de 1 km siempre caen en la misma celda o en celdas contiguas, aunque estén a la deriva.
+--    Si en la celda del barco hay más de 4 barcos quietos es un fondeadero o una zona de espera
+--    (decenas de barcos fondeados juntos), no un encuentro discreto, y no se alerta.
 INSERT INTO lake.gold.alerts
 SELECT
   MD5(CONCAT_WS('|', 'sts_encounter', CAST(a.mmsi AS STRING), CAST(b.mmsi AS STRING),
@@ -451,7 +491,7 @@ SELECT
   'sts_encounter', a.mmsi, CAST(NULL AS BIGINT),
   CAST(GREATEST(a.first_ts, b.first_ts) AS TIMESTAMP_LTZ(6)),
   CAST(LEAST(a.last_ts, b.last_ts) AS TIMESTAMP_LTZ(6)),
-  (a.lat + b.lat) / 2, (a.lon + b.lon) / 2, a.h3_r7,
+  (a.lat + b.lat) / 2, (a.lon + b.lon) / 2, h3_cell((a.lat + b.lat) / 2, (a.lon + b.lon) / 2, 7),
   LEAST(1.0, 0.5 + TIMESTAMPDIFF(MINUTE, GREATEST(a.first_ts, b.first_ts),
                                  LEAST(a.last_ts, b.last_ts)) / 240.0),
   JSON_OBJECT(
@@ -460,67 +500,111 @@ SELECT
     KEY 'minutes_together' VALUE TIMESTAMPDIFF(MINUTE, GREATEST(a.first_ts, b.first_ts),
                                                LEAST(a.last_ts, b.last_ts)),
     KEY 'avg_sog' VALUE ROUND(a.avg_sog, 2),
-    KEY 'other_avg_sog' VALUE ROUND(b.avg_sog, 2)),
+    KEY 'other_avg_sog' VALUE ROUND(b.avg_sog, 2),
+    KEY 'slow_vessels_in_cell' VALUE d.slow_vessels),
   CAST(CURRENT_TIMESTAMP AS TIMESTAMP_LTZ(3)),
   CAST(a.window_start AS DATE)
 FROM (
-  -- Por barco, celda y ventana de 2 h: posición media y cuánto tiempo estuvo quieto ahí.
-  -- (Ventanas de grupo clásicas: la TVF TUMBLE no acepta una subconsulta con lookup join.)
-  SELECT mmsi, h3_r7,
-         TUMBLE_START(event_ts, INTERVAL '2' HOUR) AS window_start,
-         TUMBLE_ROWTIME(event_ts, INTERVAL '2' HOUR) AS w_rt,
-         AVG(lat) AS lat, AVG(lon) AS lon, AVG(sog) AS avg_sog,
-         MIN(event_ts) AS first_ts, MAX(event_ts) AS last_ts
+  SELECT w.*, d.cell, h3_cell(w.lat, w.lon, 6) AS own_cell
   FROM (
-    SELECT k.mmsi, k.event_ts, k.lat, k.lon, k.sog, k.h3_r7
+    -- Por barco y ventana de 2 h: posición media y cuánto tiempo estuvo quieto.
+    -- (Ventanas de grupo clásicas: la TVF TUMBLE no acepta una subconsulta con lookup join.)
+    SELECT mmsi,
+           TUMBLE_START(event_ts, INTERVAL '2' HOUR) AS window_start,
+           TUMBLE_ROWTIME(event_ts, INTERVAL '2' HOUR) AS w_rt,
+           AVG(lat) AS lat, AVG(lon) AS lon, AVG(sog) AS avg_sog,
+           MIN(event_ts) AS first_ts, MAX(event_ts) AS last_ts
     FROM (
-      SELECT mmsi, event_ts, proc_time, lat, lon, sog,
-             h3_cell(lat, lon, 7) AS h3_r7, h3_cell(lat, lon, 6) AS h3_r6
-      FROM kafka_ais
-      WHERE message_type IN ('PositionReport', 'StandardClassBPositionReport', 'ExtendedClassBPositionReport')
-    AND lat BETWEEN -90 AND 90 AND lon BETWEEN -180 AND 180 AND NOT (lat = 0 AND lon = 0)
-        AND sog < 2 AND COALESCE(nav_status, -1) <> 5
-    ) AS k
-    LEFT JOIN port_zone FOR SYSTEM_TIME AS OF k.proc_time AS p ON k.h3_r6 = p.h3_r6
-    WHERE p.h3_r6 IS NULL
-  )
-  GROUP BY mmsi, h3_r7, TUMBLE(event_ts, INTERVAL '2' HOUR)
-  HAVING TIMESTAMPDIFF(MINUTE, MIN(event_ts), MAX(event_ts)) >= 90
+      SELECT k.mmsi, k.event_ts, k.lat, k.lon, k.sog
+      FROM (
+        SELECT mmsi, event_ts, proc_time, lat, lon, sog, h3_cell(lat, lon, 6) AS h3_r6
+        FROM kafka_ais
+        WHERE message_type IN ('PositionReport', 'StandardClassBPositionReport', 'ExtendedClassBPositionReport')
+      AND lat BETWEEN -90 AND 90 AND lon BETWEEN -180 AND 180 AND NOT (lat = 0 AND lon = 0)
+          AND sog < 2 AND COALESCE(nav_status, -1) <> 5
+      ) AS k
+      LEFT JOIN port_zone FOR SYSTEM_TIME AS OF k.proc_time AS p ON k.h3_r6 = p.h3_r6
+      WHERE p.h3_r6 IS NULL
+    )
+    GROUP BY mmsi, TUMBLE(event_ts, INTERVAL '2' HOUR)
+    HAVING TIMESTAMPDIFF(MINUTE, MIN(event_ts), MAX(event_ts)) >= 90
+  ) AS w, LATERAL TABLE(h3_disk(w.lat, w.lon, 6, 1)) AS d(cell)
 ) AS a
 JOIN (
-  -- Por barco, celda y ventana de 2 h: posición media y cuánto tiempo estuvo quieto ahí.
-  -- (Ventanas de grupo clásicas: la TVF TUMBLE no acepta una subconsulta con lookup join.)
-  SELECT mmsi, h3_r7,
-         TUMBLE_START(event_ts, INTERVAL '2' HOUR) AS window_start,
-         TUMBLE_ROWTIME(event_ts, INTERVAL '2' HOUR) AS w_rt,
-         AVG(lat) AS lat, AVG(lon) AS lon, AVG(sog) AS avg_sog,
-         MIN(event_ts) AS first_ts, MAX(event_ts) AS last_ts
+  SELECT w.*, h3_cell(w.lat, w.lon, 6) AS cell
   FROM (
-    SELECT k.mmsi, k.event_ts, k.lat, k.lon, k.sog, k.h3_r7
+    -- Por barco y ventana de 2 h: posición media y cuánto tiempo estuvo quieto.
+    -- (Ventanas de grupo clásicas: la TVF TUMBLE no acepta una subconsulta con lookup join.)
+    SELECT mmsi,
+           TUMBLE_START(event_ts, INTERVAL '2' HOUR) AS window_start,
+           TUMBLE_ROWTIME(event_ts, INTERVAL '2' HOUR) AS w_rt,
+           AVG(lat) AS lat, AVG(lon) AS lon, AVG(sog) AS avg_sog,
+           MIN(event_ts) AS first_ts, MAX(event_ts) AS last_ts
     FROM (
-      SELECT mmsi, event_ts, proc_time, lat, lon, sog,
-             h3_cell(lat, lon, 7) AS h3_r7, h3_cell(lat, lon, 6) AS h3_r6
-      FROM kafka_ais
-      WHERE message_type IN ('PositionReport', 'StandardClassBPositionReport', 'ExtendedClassBPositionReport')
-    AND lat BETWEEN -90 AND 90 AND lon BETWEEN -180 AND 180 AND NOT (lat = 0 AND lon = 0)
-        AND sog < 2 AND COALESCE(nav_status, -1) <> 5
-    ) AS k
-    LEFT JOIN port_zone FOR SYSTEM_TIME AS OF k.proc_time AS p ON k.h3_r6 = p.h3_r6
-    WHERE p.h3_r6 IS NULL
-  )
-  GROUP BY mmsi, h3_r7, TUMBLE(event_ts, INTERVAL '2' HOUR)
-  HAVING TIMESTAMPDIFF(MINUTE, MIN(event_ts), MAX(event_ts)) >= 90
+      SELECT k.mmsi, k.event_ts, k.lat, k.lon, k.sog
+      FROM (
+        SELECT mmsi, event_ts, proc_time, lat, lon, sog, h3_cell(lat, lon, 6) AS h3_r6
+        FROM kafka_ais
+        WHERE message_type IN ('PositionReport', 'StandardClassBPositionReport', 'ExtendedClassBPositionReport')
+      AND lat BETWEEN -90 AND 90 AND lon BETWEEN -180 AND 180 AND NOT (lat = 0 AND lon = 0)
+          AND sog < 2 AND COALESCE(nav_status, -1) <> 5
+      ) AS k
+      LEFT JOIN port_zone FOR SYSTEM_TIME AS OF k.proc_time AS p ON k.h3_r6 = p.h3_r6
+      WHERE p.h3_r6 IS NULL
+    )
+    GROUP BY mmsi, TUMBLE(event_ts, INTERVAL '2' HOUR)
+    HAVING TIMESTAMPDIFF(MINUTE, MIN(event_ts), MAX(event_ts)) >= 90
+  ) AS w
 ) AS b
   -- Misma ventana (join por intervalo sobre el tiempo de la ventana: el estado se limpia solo).
-  ON a.h3_r7 = b.h3_r7
+  ON a.cell = b.cell
  AND a.w_rt BETWEEN b.w_rt - INTERVAL '1' SECOND AND b.w_rt + INTERVAL '1' SECOND
+JOIN (
+  -- Barcos quietos por celda H3 res 6 y ventana de 2 h (para descartar fondeaderos).
+  SELECT cell,
+         TUMBLE_ROWTIME(w_rt, INTERVAL '2' HOUR) AS d_rt,
+         COUNT(*) AS slow_vessels
+  FROM (
+    SELECT h3_cell(w.lat, w.lon, 6) AS cell, w.w_rt
+    FROM (
+      -- Por barco y ventana de 2 h: posición media y cuánto tiempo estuvo quieto.
+      -- (Ventanas de grupo clásicas: la TVF TUMBLE no acepta una subconsulta con lookup join.)
+      SELECT mmsi,
+             TUMBLE_START(event_ts, INTERVAL '2' HOUR) AS window_start,
+             TUMBLE_ROWTIME(event_ts, INTERVAL '2' HOUR) AS w_rt,
+             AVG(lat) AS lat, AVG(lon) AS lon, AVG(sog) AS avg_sog,
+             MIN(event_ts) AS first_ts, MAX(event_ts) AS last_ts
+      FROM (
+        SELECT k.mmsi, k.event_ts, k.lat, k.lon, k.sog
+        FROM (
+          SELECT mmsi, event_ts, proc_time, lat, lon, sog, h3_cell(lat, lon, 6) AS h3_r6
+          FROM kafka_ais
+          WHERE message_type IN ('PositionReport', 'StandardClassBPositionReport', 'ExtendedClassBPositionReport')
+        AND lat BETWEEN -90 AND 90 AND lon BETWEEN -180 AND 180 AND NOT (lat = 0 AND lon = 0)
+            AND sog < 2 AND COALESCE(nav_status, -1) <> 5
+        ) AS k
+        LEFT JOIN port_zone FOR SYSTEM_TIME AS OF k.proc_time AS p ON k.h3_r6 = p.h3_r6
+        WHERE p.h3_r6 IS NULL
+      )
+      GROUP BY mmsi, TUMBLE(event_ts, INTERVAL '2' HOUR)
+      HAVING TIMESTAMPDIFF(MINUTE, MIN(event_ts), MAX(event_ts)) >= 90
+    ) AS w
+  )
+  GROUP BY cell, TUMBLE(w_rt, INTERVAL '2' HOUR)
+) AS d
+  ON a.own_cell = d.cell
+ AND a.w_rt BETWEEN d.d_rt - INTERVAL '1' SECOND AND d.d_rt + INTERVAL '1' SECOND
 WHERE a.mmsi < b.mmsi
+  AND d.slow_vessels <= 4
   AND haversine_km(a.lat, a.lon, b.lat, b.lon) < 1.0
   AND TIMESTAMPDIFF(MINUTE, GREATEST(a.first_ts, b.first_ts), LEAST(a.last_ts, b.last_ts)) >= 90;
 
 -- 6. Merodeo sobre un cable o ducto submarino: un barco lento (< 3 nudos) o fondeado pasa al menos
 --    30 minutos de una hora dentro de la franja de un cable, fuera de puerto. Es el patrón previo
 --    a los daños de cables en el Báltico (Balticconnector 2023, Eagle S 2024).
+--    Ventanas de 1 h que avanzan cada 30 min: una estadía de 30 min o más siempre deja al menos
+--    30 min en alguna ventana, aunque cruce el cambio de hora (con ventanas fijas, 50 min
+--    repartidos en 25 + 25 no alertaban).
 INSERT INTO lake.gold.alerts
 SELECT
   MD5(CONCAT_WS('|', 'cable_loitering', CAST(mmsi AS STRING), CAST(window_start AS STRING))),
@@ -536,7 +620,7 @@ SELECT
   CAST(CURRENT_TIMESTAMP AS TIMESTAMP_LTZ(3)),
   CAST(window_start AS DATE)
 FROM (
-  SELECT mmsi, TUMBLE_START(event_ts, INTERVAL '1' HOUR) AS window_start,
+  SELECT mmsi, HOP_START(event_ts, INTERVAL '30' MINUTE, INTERVAL '1' HOUR) AS window_start,
          MAX(cables) AS cables, MAX(h3_r7) AS h3_r7, AVG(lat) AS lat, AVG(lon) AS lon,
          AVG(sog) AS avg_sog, MIN(event_ts) AS first_ts, MAX(event_ts) AS last_ts,
          COUNT(*) AS reports, SUM(CASE WHEN nav_status = 1 THEN 1 ELSE 0 END) AS anchored
@@ -554,7 +638,7 @@ FROM (
     LEFT JOIN port_zone FOR SYSTEM_TIME AS OF k.proc_time AS p ON k.h3_r6 = p.h3_r6
     WHERE p.h3_r6 IS NULL
   )
-  GROUP BY mmsi, TUMBLE(event_ts, INTERVAL '1' HOUR)
+  GROUP BY mmsi, HOP(event_ts, INTERVAL '30' MINUTE, INTERVAL '1' HOUR)
   HAVING TIMESTAMPDIFF(MINUTE, MIN(event_ts), MAX(event_ts)) >= 30
 );
 

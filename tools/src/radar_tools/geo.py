@@ -151,8 +151,8 @@ def cable_cells(ring: int = 1) -> dict[str, str]:
 DDL = """
 CREATE TABLE IF NOT EXISTS port_cells (h3_r6 TEXT PRIMARY KEY, port TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS cable_cells (h3_r7 TEXT PRIMARY KEY, cables TEXT NOT NULL);
--- La escribe Flink (job de detecciones): mensajes y barcos por celda y hora. Los apagones la
--- consultan para saber si en esa celda y hora se oía a otros barcos.
+-- La escribe Flink (job de detecciones): mensajes y barcos por celda y hora. Es el mapa
+-- de cobertura de Grafana.
 CREATE TABLE IF NOT EXISTS coverage_hourly (
     h3_r7        TEXT      NOT NULL,
     window_start TIMESTAMP NOT NULL,
@@ -164,6 +164,14 @@ CREATE TABLE IF NOT EXISTS coverage_hourly (
 ALTER TABLE coverage_hourly ADD COLUMN IF NOT EXISTS lat DOUBLE PRECISION;
 ALTER TABLE coverage_hourly ADD COLUMN IF NOT EXISTS lon DOUBLE PRECISION;
 CREATE INDEX IF NOT EXISTS coverage_hourly_time ON coverage_hourly (window_start);
+-- Lo mismo por zona (H3 res 5, ~250 km²): la consultan los apagones.
+CREATE TABLE IF NOT EXISTS coverage_zone_hourly (
+    h3_r5        TEXT      NOT NULL,
+    window_start TIMESTAMP NOT NULL,
+    messages     BIGINT    NOT NULL,
+    vessels      BIGINT    NOT NULL,
+    PRIMARY KEY (h3_r5, window_start)
+);
 -- Copia de gold.alerts para Grafana (la escribe Flink; upsert por alert_id). Horas en UTC.
 CREATE TABLE IF NOT EXISTS alerts (
     alert_id    TEXT PRIMARY KEY,
