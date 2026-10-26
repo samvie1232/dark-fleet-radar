@@ -5,7 +5,7 @@ set -euo pipefail
 C="docker compose"
 
 echo "1) Estado antes del fallo"
-$C --profile tools run --rm tools verify
+$C --profile tools run --rm --build tools verify
 
 echo "2) Matando el TaskManager (como si se cayera la máquina)…"
 $C kill flink-taskmanager
