@@ -59,14 +59,18 @@ def alerts(limit: int = 20) -> int:
         return 1
     rows = catalog.load_table("gold.alerts").scan().to_arrow()  # noqa: F841 (lo lee duckdb)
     con = duckdb.connect()
-    print(con.sql(
-        "SELECT alert_type, COUNT(*) AS alertas, COUNT(DISTINCT mmsi) AS barcos, "
-        "ROUND(AVG(score), 2) AS puntaje_medio FROM rows GROUP BY 1 ORDER BY 2 DESC"
-    ))
-    print(con.sql(
-        "SELECT alert_type, mmsi, imo, end_time, ROUND(score, 2) AS score, evidence "
-        f"FROM rows ORDER BY end_time DESC LIMIT {int(limit)}"
-    ))
+    print(
+        con.sql(
+            "SELECT alert_type, COUNT(*) AS alertas, COUNT(DISTINCT mmsi) AS barcos, "
+            "ROUND(AVG(score), 2) AS puntaje_medio FROM rows GROUP BY 1 ORDER BY 2 DESC"
+        )
+    )
+    print(
+        con.sql(
+            "SELECT alert_type, mmsi, imo, end_time, ROUND(score, 2) AS score, evidence "
+            f"FROM rows ORDER BY end_time DESC LIMIT {int(limit)}"
+        )
+    )
     return 0
 
 
