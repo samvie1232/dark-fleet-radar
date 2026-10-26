@@ -1,0 +1,19 @@
+apiVersion: 1
+datasources:
+  - name: Postgres
+    uid: radar-pg
+    type: grafana-postgresql-datasource
+    url: postgres:5432
+    user: radar
+    jsonData:
+      database: radar
+      sslmode: disable
+      postgresVersion: 1600
+      timescaledb: false
+    secureJsonData:
+      password: radar
+    isDefault: true
+  - name: Prometheus
+    uid: radar-prom
+    type: prometheus
+    url: http://prometheus:9090

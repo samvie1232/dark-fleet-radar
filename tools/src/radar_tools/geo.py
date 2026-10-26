@@ -160,6 +160,26 @@ CREATE TABLE IF NOT EXISTS coverage_hourly (
     vessels      BIGINT    NOT NULL,
     PRIMARY KEY (h3_r7, window_start)
 );
+-- Centro aproximado de la celda (posición media de los mensajes), para el mapa de Grafana.
+ALTER TABLE coverage_hourly ADD COLUMN IF NOT EXISTS lat DOUBLE PRECISION;
+ALTER TABLE coverage_hourly ADD COLUMN IF NOT EXISTS lon DOUBLE PRECISION;
+CREATE INDEX IF NOT EXISTS coverage_hourly_time ON coverage_hourly (window_start);
+-- Copia de gold.alerts para Grafana (la escribe Flink; upsert por alert_id). Horas en UTC.
+CREATE TABLE IF NOT EXISTS alerts (
+    alert_id    TEXT PRIMARY KEY,
+    alert_type  TEXT NOT NULL,
+    mmsi        BIGINT,
+    imo         BIGINT,
+    start_time  TIMESTAMP,
+    end_time    TIMESTAMP,
+    lat         DOUBLE PRECISION,
+    lon         DOUBLE PRECISION,
+    h3_r7       TEXT,
+    score       DOUBLE PRECISION,
+    evidence    TEXT,
+    detected_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS alerts_end_time ON alerts (end_time);
 """
 
 

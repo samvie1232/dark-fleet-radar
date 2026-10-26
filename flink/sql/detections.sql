@@ -1,13 +1,13 @@
--- Dark Fleet Radar · paso 3
+-- Dark Fleet Radar · pasos 3 y 4
 -- Segundo job de Flink: lee ais.raw con su propio consumer group y escribe en la capa gold:
 --   gold.coverage_h3  mensajes y barcos por celda H3 (res 7) y hora: el mapa de cobertura
 --   gold.alerts       spoofing (saltos imposibles), barcos sancionados, cambios de identidad,
 --                     apagones de señal, encuentros en alta mar y merodeo sobre cables
 -- Va separado del job de ingesta para poder cambiar reglas sin tocar el estado de bronze/silver.
 
-SET 'pipeline.name' = 'dark-fleet-radar-detections-v2';
+SET 'pipeline.name' = 'dark-fleet-radar-detections-v3';
 SET 'parallelism.default' = '1';
-SET 'state.checkpoints.dir' = 'file:///flink-data/checkpoints-detections-v2';
+SET 'state.checkpoints.dir' = 'file:///flink-data/checkpoints-detections-v3';
 SET 'table.local-time-zone' = 'UTC';
 SET 'table.exec.source.idle-timeout' = '30 s';
 -- El estado por barco (última posición, último reporte por IMO) se olvida tras 30 días.
@@ -150,6 +150,8 @@ CREATE TEMPORARY TABLE coverage_pg (
   window_start TIMESTAMP(3),
   messages     BIGINT,
   vessels      BIGINT,
+  lat          DOUBLE,
+  lon          DOUBLE,
   PRIMARY KEY (h3_r7, window_start) NOT ENFORCED
 ) WITH (
   'connector' = 'jdbc',
@@ -161,6 +163,29 @@ CREATE TEMPORARY TABLE coverage_pg (
   'lookup.partial-cache.expire-after-write' = '1 h',
   'lookup.partial-cache.max-rows' = '100000',
   'lookup.partial-cache.cache-missing-key' = 'false'
+);
+
+-- Copia de las alertas en Postgres para Grafana (upsert por alert_id).
+CREATE TEMPORARY TABLE alerts_pg (
+  alert_id     STRING,
+  alert_type   STRING,
+  mmsi         BIGINT,
+  imo          BIGINT,
+  start_time   TIMESTAMP(3),
+  end_time     TIMESTAMP(3),
+  lat          DOUBLE,
+  lon          DOUBLE,
+  h3_r7        STRING,
+  score        DOUBLE,
+  evidence     STRING,
+  detected_at  TIMESTAMP(3),
+  PRIMARY KEY (alert_id) NOT ENFORCED
+) WITH (
+  'connector' = 'jdbc',
+  'url' = 'jdbc:postgresql://postgres:5432/radar',
+  'table-name' = 'alerts',
+  'username' = 'radar',
+  'password' = 'radar'
 );
 
 CREATE TABLE IF NOT EXISTS lake.gold.coverage_h3 (
@@ -213,7 +238,8 @@ GROUP BY window_start, window_end, h3_r7;
 
 -- 1. Spoofing: para llegar a la nueva posición haría falta ir a más de 50 nudos (ningún buque
 --    mercante pasa de ~30). Se exige además un salto de más de 2 km para no confundir ruido de
---    GPS en intervalos muy cortos con un salto real.
+--    GPS en intervalos muy cortos con un salto real. Una alerta por episodio: un barco con la
+--    posición falseada salta una y otra vez, así que solo alerta el primer salto tras 6 h sin saltos.
 INSERT INTO lake.gold.alerts
 SELECT
   MD5(CONCAT_WS('|', 'spoofing_jump', CAST(mmsi AS STRING), CAST(event_time AS STRING))),
@@ -228,31 +254,41 @@ SELECT
   CAST(CURRENT_TIMESTAMP AS TIMESTAMP_LTZ(3)),
   CAST(event_time AS DATE)
 FROM (
-  SELECT *, implied_speed_kn(dist_km, dt_s) AS speed_kn
+  SELECT *,
+         FIRST_VALUE(epoch_ms(event_time)) OVER e AS prev_jump_ms,
+         COUNT(*) OVER e AS jumps
   FROM (
-    SELECT mmsi, event_time, lat, lon, prev_lat, prev_lon, h3_cell(lat, lon, 7) AS h3_r7,
-           TO_TIMESTAMP_LTZ(prev_ms, 3) AS prev_time,
-           haversine_km(prev_lat, prev_lon, lat, lon) AS dist_km,
-           (epoch_ms(event_time) - prev_ms) / 1000 AS dt_s
+    SELECT *
     FROM (
-      -- Cada posición junto a la anterior del mismo barco (estado por MMSI).
-      SELECT mmsi, event_time, lat, lon,
-             FIRST_VALUE(epoch_ms(event_time)) OVER w AS prev_ms,
-             FIRST_VALUE(lat) OVER w AS prev_lat,
-             FIRST_VALUE(lon) OVER w AS prev_lon,
-             COUNT(*) OVER w AS n
+      SELECT *, implied_speed_kn(dist_km, dt_s) AS speed_kn
       FROM (
-        SELECT * FROM kafka_ais
-        -- Posiciones válidas. (0, 0) y lat 91 / lon 181 son valores por defecto, no posiciones reales.
-        WHERE message_type IN ('PositionReport', 'StandardClassBPositionReport', 'ExtendedClassBPositionReport')
-          AND lat BETWEEN -90 AND 90 AND lon BETWEEN -180 AND 180 AND NOT (lat = 0 AND lon = 0)
+        SELECT mmsi, event_time, event_ts, lat, lon, prev_lat, prev_lon, h3_cell(lat, lon, 7) AS h3_r7,
+               TO_TIMESTAMP_LTZ(prev_ms, 3) AS prev_time,
+               haversine_km(prev_lat, prev_lon, lat, lon) AS dist_km,
+               (epoch_ms(event_time) - prev_ms) / 1000 AS dt_s
+        FROM (
+          -- Cada posición junto a la anterior del mismo barco (estado por MMSI).
+          SELECT mmsi, event_time, event_ts, lat, lon,
+                 FIRST_VALUE(epoch_ms(event_time)) OVER w AS prev_ms,
+                 FIRST_VALUE(lat) OVER w AS prev_lat,
+                 FIRST_VALUE(lon) OVER w AS prev_lon,
+                 COUNT(*) OVER w AS n
+          FROM (
+            SELECT * FROM kafka_ais
+            -- Posiciones válidas. (0, 0) y lat 91 / lon 181 son valores por defecto, no posiciones reales.
+            WHERE message_type IN ('PositionReport', 'StandardClassBPositionReport', 'ExtendedClassBPositionReport')
+              AND lat BETWEEN -90 AND 90 AND lon BETWEEN -180 AND 180 AND NOT (lat = 0 AND lon = 0)
+          )
+          WINDOW w AS (PARTITION BY mmsi ORDER BY event_ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
+        )
+        WHERE n = 2
       )
-      WINDOW w AS (PARTITION BY mmsi ORDER BY event_ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
     )
-    WHERE n = 2
+    WHERE dist_km > 2 AND speed_kn > 50
   )
+  WINDOW e AS (PARTITION BY mmsi ORDER BY event_ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
 )
-WHERE dist_km > 2 AND speed_kn > 50;
+WHERE jumps = 1 OR epoch_ms(event_time) - prev_jump_ms > 6 * 3600 * 1000;
 
 -- 2. Barco sancionado: una sola alerta por barco (MMSI), con todas las listas que lo nombran.
 --    Se busca por IMO (lo más fiable, solo si el dígito de control es válido) y por MMSI (barcos
@@ -348,9 +384,9 @@ WHERE n = 2
 
 -- Misma cobertura en Postgres (upsert por celda y hora) para que la consulten los apagones.
 INSERT INTO coverage_pg
-SELECT h3_r7, CAST(window_start AS TIMESTAMP(3)), COUNT(*), COUNT(DISTINCT mmsi)
+SELECT h3_r7, CAST(window_start AS TIMESTAMP(3)), COUNT(*), COUNT(DISTINCT mmsi), AVG(lat), AVG(lon)
 FROM (
-  SELECT window_start, window_end, mmsi, h3_cell(lat, lon, 7) AS h3_r7
+  SELECT window_start, window_end, mmsi, lat, lon, h3_cell(lat, lon, 7) AS h3_r7
   FROM TABLE(TUMBLE(TABLE kafka_ais, DESCRIPTOR(event_ts), INTERVAL '1' HOUR))
   WHERE message_type IN ('PositionReport', 'StandardClassBPositionReport', 'ExtendedClassBPositionReport')
     AND lat BETWEEN -90 AND 90 AND lon BETWEEN -180 AND 180 AND NOT (lat = 0 AND lon = 0)
@@ -521,5 +557,14 @@ FROM (
   GROUP BY mmsi, TUMBLE(event_ts, INTERVAL '1' HOUR)
   HAVING TIMESTAMPDIFF(MINUTE, MIN(event_ts), MAX(event_ts)) >= 30
 );
+
+-- Lleva a Postgres todo lo que entra en gold.alerts (lectura continua de la tabla Iceberg: primero
+-- lo que ya hay y luego cada commit nuevo). Grafana lee de ahí.
+INSERT INTO alerts_pg
+SELECT alert_id, alert_type, mmsi, imo,
+       CAST(start_time AS TIMESTAMP(3)), CAST(end_time AS TIMESTAMP(3)),
+       lat, lon, h3_r7, score, evidence, CAST(detected_at AS TIMESTAMP(3))
+FROM lake.gold.alerts /*+ OPTIONS('streaming' = 'true', 'monitor-interval' = '30 s',
+                                  'starting-strategy' = 'TABLE_SCAN_THEN_INCREMENTAL') */;
 
 END;
