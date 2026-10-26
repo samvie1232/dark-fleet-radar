@@ -146,6 +146,8 @@ services:
         state.checkpoints.num-retained: 3
         state.backend.type: hashmap
         state.checkpoints.dir: file:///flink-data/checkpoints
+        metrics.reporter.prom.factory.class: org.apache.flink.metrics.prometheus.PrometheusReporterFactory
+        metrics.reporter.prom.port: 9249
         restart-strategy.type: exponential-delay
     volumes:
       - flink-data:/flink-data
@@ -220,9 +222,45 @@ services:
     depends_on:
       iceberg-rest: { condition: service_healthy }
 
+  # ---------- Paso 4: monitoreo y tablero ----------
+
+  # Métricas del productor (mensajes, DLQ, retraso) y de Flink (checkpoints, registros por segundo).
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=15d
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+
+  # Tablero: mapa de alertas y de cobertura, alertas por tipo, salud del pipeline.
+  # http://localhost:3000 (se entra sin usuario en modo lectura; admin / admin para editar).
+  grafana:
+    image: grafana/grafana-oss:11.3.1
+    depends_on:
+      postgres: { condition: service_healthy }
+      prometheus: { condition: service_started }
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/dark-fleet-radar.json
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    restart: unless-stopped
+
 volumes:
   redpanda-data:
   s3-data:
   iceberg-catalog:
   flink-data:
   postgres-data:
+  prometheus-data:
+  grafana-data:

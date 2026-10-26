@@ -64,6 +64,6 @@ submit_job() {  # $1 = nombre, $2 = archivo SQL, $3 = carpeta de checkpoints del
 # Ingesta (bronze + silver). Usa la carpeta de checkpoints por defecto del cluster.
 submit_job "dark-fleet-radar" /opt/sql/pipeline.sql /flink-data/checkpoints
 # Detecciones (gold). Nombre y carpeta llevan la versión de las reglas (fijadas en detections.sql).
-DETECTIONS="dark-fleet-radar-detections-v2"
+DETECTIONS="dark-fleet-radar-detections-v3"
 cancel_old_versions "dark-fleet-radar-detections" "$DETECTIONS"
-submit_job "$DETECTIONS" /opt/sql/detections.sql /flink-data/checkpoints-detections-v2
+submit_job "$DETECTIONS" /opt/sql/detections.sql /flink-data/checkpoints-detections-v3

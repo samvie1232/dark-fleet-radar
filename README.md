@@ -47,6 +47,8 @@ docker compose up -d --build
 docker compose logs -f producer
 ```
 
+- **Tablero (Grafana): http://localhost:3000** — mapa de alertas, cobertura, alertas por tipo y salud
+  del pipeline. Se entra sin usuario; para editar, `admin` / `admin`.
 - Flink (job, checkpoints, backpressure): http://localhost:8081
 - Resumen del lago: `docker compose --profile tools run --rm tools summary`
 - Consola de Redpanda (topics y mensajes): http://localhost:8090 (cámbialo con `CONSOLE_PORT` en `.env`)
@@ -91,6 +93,16 @@ Si apagas el PC, al volver corre `docker compose up -d`: el servicio `flink-job`
 **Decisión de diseño, S3 local:** el brief original usaba MinIO, pero MinIO dejó de publicar
 imágenes en Docker Hub. Iceberg solo necesita una API S3, así que se usa SeaweedFS (Apache 2.0).
 
+## Tablero
+
+Grafana (`infra/grafana/`) lee de dos fuentes:
+- **Postgres**: el job de detecciones copia cada alerta de `gold.alerts` a la tabla `alerts` (lectura
+  continua de la tabla Iceberg) y escribe la cobertura por celda y hora en `coverage_hourly`.
+- **Prometheus**: métricas del productor (mensajes por minuto, % a la DLQ, retraso del evento) y de
+  Flink (checkpoints completados, fallidos y su duración).
+
+El tablero se genera con `python infra/grafana/build_dashboard.py`; se edita ahí y no a mano en el JSON.
+
 ## Detecciones
 
 Corren en un job de Flink aparte del de ingesta: se pueden cambiar las reglas y reenviar ese job
@@ -99,7 +111,7 @@ así que si una alerta se escribiera dos veces se reconoce como la misma.
 
 | Alerta | Regla | Puntaje |
 |---|---|---|
-| `spoofing_jump` | Entre dos posiciones seguidas del mismo MMSI haría falta ir a más de 50 nudos, con un salto de más de 2 km (ningún mercante pasa de unos 30 nudos; los 2 km evitan confundir ruido de GPS con un salto) | velocidad / 100, máximo 1 |
+| `spoofing_jump` | Entre dos posiciones seguidas del mismo MMSI haría falta ir a más de 50 nudos, con un salto de más de 2 km (ningún mercante pasa de unos 30 nudos; los 2 km evitan confundir ruido de GPS con un salto). Una alerta por episodio: solo el primer salto tras 6 h sin saltos de ese barco | velocidad / 100, máximo 1 |
 | `sanctioned_vessel` | El IMO (con dígito de control válido) o el MMSI de un reporte estático aparece en la lista marítima de [OpenSanctions](https://www.opensanctions.org/datasets/maritime/). Una alerta por barco, con todas las listas que lo nombran | 1,0 si está sancionado, 0,7 si es otro riesgo |
 | `identity_change` | Mismo IMO con un nombre o MMSI nunca visto antes para ese IMO, en menos de 30 días (los barcos que alternan entre dos formas de escribir su nombre no alertan cada vez) | 0,9 si cambia la bandera (MID), 0,7 si cambia el MMSI, 0,5 si solo el nombre |
 | `dark_gap` | Un barco calla 2 horas o más fuera de puerto **y** en la hora central del silencio se oía a otros 2 barcos o más en su misma celda H3. Si no se oía a nadie, el silencio puede ser de cobertura (o del propio receptor apagado) y no alerta | horas de silencio / 12, máximo 1 |
@@ -111,7 +123,7 @@ del Norte y el Báltico (unos 10 km alrededor) y 9 cables y ductos (Balticconnec
 C-Lion1, Nord Stream, BCS, NordBalt, NorNed, North Sea Link). **Los trazados son aproximados**, unos
 pocos puntos por cable; para algo serio habría que cargar el trazado real (por ejemplo de EMODnet).
 
-Cuando se cambian las reglas, el job de detecciones sube de versión (`dark-fleet-radar-detections-v2`):
+Cuando se cambian las reglas, el job de detecciones sube de versión (hoy `dark-fleet-radar-detections-v3`):
 `flink-job` cancela la versión anterior y la nueva sigue desde los offsets que esa dejó en Kafka.
 
 La lista de OpenSanctions se descarga y se carga en Postgres al arrancar (servicio `ref-loader`).
