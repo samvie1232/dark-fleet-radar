@@ -378,15 +378,18 @@ def build_plan(seed: int = 42, n: int = 12, listed_imos: list[int] | None = None
         b.statics(new, imo, f"EVAL NEW {i}", t0 + 130, t0 + 240)
         b.label(f"identity-pos-{i}", "identity_change", new, True)
     for i in range(n):
-        kind = neg_kind(i, ("same_identity", "name_case_spaces"))
+        kind = neg_kind(i, ("same_identity", "name_case_spaces", "name_word_order"))
         t0 = start(240)
         mmsi, imo = b.mmsi(), b.imo()
         b.track(mmsi, start=b.site(), t0=t0, t1=t0 + 240, sog=10)
         if kind == "same_identity":
             b.statics(mmsi, imo, f"EVAL SAME {i}", t0, t0 + 240)
-        else:  # mismo nombre con otra caja y espacios: se normaliza, no es un cambio
+        elif kind == "name_case_spaces":  # otra caja y espacios: se normaliza, no es un cambio
             b.statics(mmsi, imo, f"Eval Same {i}", t0, t0 + 120)
             b.statics(mmsi, imo, f"  EVAL SAME {i} ", t0 + 125, t0 + 240)
+        else:  # mismas palabras en otro orden ("VLI-25 CINDY" / "CINDY VLI-25"): tampoco
+            b.statics(mmsi, imo, f"EVAL-{i} SAME", t0, t0 + 120)
+            b.statics(mmsi, imo, f"SAME EVAL-{i}", t0 + 125, t0 + 240)
         b.label(f"identity-neg-{kind}-{i}", "identity_change", mmsi, False)
 
     return b.plan

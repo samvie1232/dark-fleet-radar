@@ -1,6 +1,6 @@
 {
   "meta": {
-    "run_at": "2026-10-26 21:12 UTC",
+    "run_at": "2026-10-26 22:13 UTC",
     "hours": 12,
     "messages": 58771,
     "seed": 42
@@ -41,7 +41,7 @@
       "fn": 0,
       "precision": 1.0,
       "recall": 1.0,
-      "alerts_per_detected_case": 1.5833333333333333,
+      "alerts_per_detected_case": 1.3333333333333333,
       "missed": [],
       "false_alarms": []
     },

@@ -5,9 +5,9 @@
 --                     apagones de señal, encuentros en alta mar y merodeo sobre cables
 -- Va separado del job de ingesta para poder cambiar reglas sin tocar el estado de bronze/silver.
 
-SET 'pipeline.name' = 'dark-fleet-radar-detections-v4';
+SET 'pipeline.name' = 'dark-fleet-radar-detections-v5';
 SET 'parallelism.default' = '1';
-SET 'state.checkpoints.dir' = 'file:///flink-data/checkpoints-detections-v4';
+SET 'state.checkpoints.dir' = 'file:///flink-data/checkpoints-detections-v5';
 SET 'table.local-time-zone' = 'UTC';
 SET 'table.exec.source.idle-timeout' = '30 s';
 -- El estado por barco (última posición, último reporte por IMO) se olvida tras 30 días.
@@ -19,6 +19,7 @@ CREATE TEMPORARY SYSTEM FUNCTION implied_speed_kn AS 'radar.udf.ImpliedSpeedKnot
 CREATE TEMPORARY SYSTEM FUNCTION imo_valid AS 'radar.udf.ImoValid';
 CREATE TEMPORARY SYSTEM FUNCTION epoch_ms AS 'radar.udf.EpochMillis';
 CREATE TEMPORARY SYSTEM FUNCTION h3_disk AS 'radar.udf.H3Disk';
+CREATE TEMPORARY SYSTEM FUNCTION name_key AS 'radar.udf.NameKey';
 
 CREATE CATALOG lake WITH (
   'type' = 'iceberg',
@@ -377,25 +378,30 @@ SELECT
   CAST(CURRENT_TIMESTAMP AS TIMESTAMP_LTZ(3)),
   CAST(event_time AS DATE)
 FROM (
-  SELECT imo, mmsi, name, event_time, prev_mmsi, prev_name, n,
+  SELECT imo, mmsi, name, event_time, prev_mmsi, prev_name, nkey, prev_nkey, n,
          TO_TIMESTAMP_LTZ(prev_ms, 3) AS prev_time
   FROM (
     -- Cada reporte junto al anterior del mismo IMO (estado por IMO). El IMO identifica el casco
     -- y no cambia nunca: si con el mismo IMO cambia el nombre o el MMSI, es un cambio de identidad.
-    SELECT imo, mmsi, ship_name AS name, event_time,
+    SELECT imo, mmsi, ship_name AS name, event_time, nkey,
            FIRST_VALUE(mmsi) OVER w AS prev_mmsi,
            FIRST_VALUE(ship_name) OVER w AS prev_name,
+           FIRST_VALUE(nkey) OVER w AS prev_nkey,
            FIRST_VALUE(epoch_ms(event_time)) OVER w AS prev_ms,
            COUNT(*) OVER w AS n
     FROM (
-      -- Primera vez que se ve cada combinación (IMO, MMSI, nombre). Va por tiempo de proceso
+      -- Primera vez que se ve cada combinación (IMO, MMSI, nombre). El nombre se compara por su
+      -- clave (name_key: sin importar orden de palabras, caja ni signos). Va por tiempo de proceso
       -- porque deduplicar por tiempo de evento emite correcciones, y la ventana OVER no las acepta.
       SELECT *
       FROM (
-        SELECT *, ROW_NUMBER() OVER (PARTITION BY imo, mmsi, ship_name ORDER BY proc_time) AS rn
-        FROM kafka_ais
-        WHERE message_type IN ('ShipStaticData', 'StaticDataReport')
-          AND imo_valid(imo) AND ship_name IS NOT NULL AND ship_name <> ''
+        SELECT *, ROW_NUMBER() OVER (PARTITION BY imo, mmsi, nkey ORDER BY proc_time) AS rn
+        FROM (
+          SELECT *, name_key(ship_name) AS nkey
+          FROM kafka_ais
+          WHERE message_type IN ('ShipStaticData', 'StaticDataReport') AND imo_valid(imo)
+        )
+        WHERE nkey IS NOT NULL
       )
       WHERE rn = 1
     )
@@ -403,7 +409,7 @@ FROM (
   )
 )
 WHERE n = 2
-  AND (prev_mmsi <> mmsi OR prev_name <> name)
+  AND (prev_mmsi <> mmsi OR prev_nkey <> nkey)
   AND TIMESTAMPDIFF(DAY, prev_time, event_time) <= 30;
 
 -- Misma cobertura en Postgres (upsert por celda y hora) para que la consulten los apagones.
