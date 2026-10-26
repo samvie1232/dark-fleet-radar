@@ -1,12 +1,13 @@
--- Dark Fleet Radar · paso 3A
+-- Dark Fleet Radar · paso 3
 -- Segundo job de Flink: lee ais.raw con su propio consumer group y escribe en la capa gold:
 --   gold.coverage_h3  mensajes y barcos por celda H3 (res 7) y hora: el mapa de cobertura
---   gold.alerts       spoofing (saltos imposibles), barcos sancionados y cambios de identidad
+--   gold.alerts       spoofing (saltos imposibles), barcos sancionados, cambios de identidad,
+--                     apagones de señal, encuentros en alta mar y merodeo sobre cables
 -- Va separado del job de ingesta para poder cambiar reglas sin tocar el estado de bronze/silver.
 
-SET 'pipeline.name' = 'dark-fleet-radar-detections';
+SET 'pipeline.name' = 'dark-fleet-radar-detections-v2';
 SET 'parallelism.default' = '1';
-SET 'state.checkpoints.dir' = 'file:///flink-data/checkpoints-detections';
+SET 'state.checkpoints.dir' = 'file:///flink-data/checkpoints-detections-v2';
 SET 'table.local-time-zone' = 'UTC';
 SET 'table.exec.source.idle-timeout' = '30 s';
 -- El estado por barco (última posición, último reporte por IMO) se olvida tras 30 días.
@@ -49,6 +50,11 @@ CREATE TEMPORARY TABLE kafka_ais (
   ship_name AS UPPER(TRIM(COALESCE(
     JSON_VALUE(`raw`, '$.Message.ShipStaticData.Name'),
     JSON_VALUE(`raw`, '$.Message.StaticDataReport.ReportA.Name')))),
+  sog AS CAST(COALESCE(
+    JSON_VALUE(`raw`, '$.Message.PositionReport.Sog'),
+    JSON_VALUE(`raw`, '$.Message.StandardClassBPositionReport.Sog'),
+    JSON_VALUE(`raw`, '$.Message.ExtendedClassBPositionReport.Sog')) AS DOUBLE),
+  nav_status AS CAST(JSON_VALUE(`raw`, '$.Message.PositionReport.NavigationalStatus') AS INT),
   WATERMARK FOR event_ts AS event_ts - INTERVAL '1' MINUTE
 ) WITH (
   'connector' = 'kafka',
@@ -65,25 +71,96 @@ CREATE TEMPORARY TABLE kafka_ais (
 
 -- Tabla de referencia en Postgres (la carga `tools load-sanctions`). Lookup con caché de 1 h:
 -- cada barco se consulta como mucho una vez por hora, aunque mande reportes cada pocos minutos.
-CREATE TEMPORARY TABLE sanctions (
-  os_id    STRING,
+-- Vistas de Postgres con una fila por barco (una por IMO y otra por MMSI).
+CREATE TEMPORARY TABLE sanctions_by_imo (
   imo      BIGINT,
-  mmsi     BIGINT,
-  name     STRING,
-  flag     STRING,
-  risk     STRING,
-  datasets STRING,
-  url      STRING
+  os_ids     STRING,
+  names      STRING,
+  sanctioned BOOLEAN,
+  datasets   STRING,
+  url        STRING,
+  entries    BIGINT
 ) WITH (
   'connector' = 'jdbc',
   'url' = 'jdbc:postgresql://postgres:5432/radar',
-  'table-name' = 'sanctioned_vessels',
+  'table-name' = 'sanctions_by_imo',
   'username' = 'radar',
   'password' = 'radar',
   'lookup.cache' = 'PARTIAL',
   'lookup.partial-cache.expire-after-write' = '1 h',
   'lookup.partial-cache.max-rows' = '100000',
   'lookup.partial-cache.cache-missing-key' = 'true'
+);
+
+CREATE TEMPORARY TABLE sanctions_by_mmsi (
+  mmsi      BIGINT,
+  os_ids     STRING,
+  names      STRING,
+  sanctioned BOOLEAN,
+  datasets   STRING,
+  url        STRING,
+  entries    BIGINT
+) WITH (
+  'connector' = 'jdbc',
+  'url' = 'jdbc:postgresql://postgres:5432/radar',
+  'table-name' = 'sanctions_by_mmsi',
+  'username' = 'radar',
+  'password' = 'radar',
+  'lookup.cache' = 'PARTIAL',
+  'lookup.partial-cache.expire-after-write' = '1 h',
+  'lookup.partial-cache.max-rows' = '100000',
+  'lookup.partial-cache.cache-missing-key' = 'true'
+);
+
+-- Zonas de puertos y de cables submarinos como celdas H3 (las carga `tools load-reference`).
+CREATE TEMPORARY TABLE port_zone (
+  h3_r6 STRING,
+  port  STRING
+) WITH (
+  'connector' = 'jdbc',
+  'url' = 'jdbc:postgresql://postgres:5432/radar',
+  'table-name' = 'port_cells',
+  'username' = 'radar',
+  'password' = 'radar',
+  'lookup.cache' = 'PARTIAL',
+  'lookup.partial-cache.expire-after-write' = '1 h',
+  'lookup.partial-cache.max-rows' = '100000',
+  'lookup.partial-cache.cache-missing-key' = 'true'
+);
+
+CREATE TEMPORARY TABLE cable_zone (
+  h3_r7  STRING,
+  cables STRING
+) WITH (
+  'connector' = 'jdbc',
+  'url' = 'jdbc:postgresql://postgres:5432/radar',
+  'table-name' = 'cable_cells',
+  'username' = 'radar',
+  'password' = 'radar',
+  'lookup.cache' = 'PARTIAL',
+  'lookup.partial-cache.expire-after-write' = '1 h',
+  'lookup.partial-cache.max-rows' = '100000',
+  'lookup.partial-cache.cache-missing-key' = 'true'
+);
+
+-- Cobertura por celda y hora también en Postgres: la escribe este job y la consultan los apagones.
+-- Sin caché de claves ausentes: una hora que aún no se cerró puede aparecer después.
+CREATE TEMPORARY TABLE coverage_pg (
+  h3_r7        STRING,
+  window_start TIMESTAMP(3),
+  messages     BIGINT,
+  vessels      BIGINT,
+  PRIMARY KEY (h3_r7, window_start) NOT ENFORCED
+) WITH (
+  'connector' = 'jdbc',
+  'url' = 'jdbc:postgresql://postgres:5432/radar',
+  'table-name' = 'coverage_hourly',
+  'username' = 'radar',
+  'password' = 'radar',
+  'lookup.cache' = 'PARTIAL',
+  'lookup.partial-cache.expire-after-write' = '1 h',
+  'lookup.partial-cache.max-rows' = '100000',
+  'lookup.partial-cache.cache-missing-key' = 'false'
 );
 
 CREATE TABLE IF NOT EXISTS lake.gold.coverage_h3 (
@@ -177,44 +254,52 @@ FROM (
 )
 WHERE dist_km > 2 AND speed_kn > 50;
 
--- 2. Barco sancionado: una alerta por barco y entrada de la lista (no una por reporte).
+-- 2. Barco sancionado: una sola alerta por barco (MMSI), con todas las listas que lo nombran.
+--    Se busca por IMO (lo más fiable, solo si el dígito de control es válido) y por MMSI (barcos
+--    sin IMO); si coinciden ambos, manda el IMO.
 INSERT INTO lake.gold.alerts
 SELECT
-  MD5(CONCAT_WS('|', 'sanctioned_vessel', CAST(mmsi AS STRING), os_id)),
+  MD5(CONCAT_WS('|', 'sanctioned_vessel', CAST(mmsi AS STRING))),
   'sanctioned_vessel', mmsi, imo, event_time, event_time,
   CAST(NULL AS DOUBLE), CAST(NULL AS DOUBLE), CAST(NULL AS STRING),
-  CASE WHEN risk LIKE 'sanction%' THEN 1.0 ELSE 0.7 END,
+  CASE WHEN sanctioned THEN 1.0 ELSE 0.7 END,
   JSON_OBJECT(
     KEY 'matched_on' VALUE matched_on,
-    KEY 'opensanctions_id' VALUE os_id,
-    KEY 'listed_name' VALUE listed_name,
+    KEY 'opensanctions_ids' VALUE os_ids,
+    KEY 'listed_names' VALUE listed_names,
     KEY 'reported_name' VALUE reported_name,
-    KEY 'risk' VALUE risk,
+    KEY 'list_entries' VALUE entries,
     KEY 'datasets' VALUE datasets,
     KEY 'url' VALUE url),
   CAST(CURRENT_TIMESTAMP AS TIMESTAMP_LTZ(3)),
   CAST(event_time AS DATE)
 FROM (
-  SELECT *, ROW_NUMBER() OVER (PARTITION BY mmsi, os_id ORDER BY proc_time) AS rn
+  SELECT *, ROW_NUMBER() OVER (PARTITION BY mmsi ORDER BY proc_time) AS rn
   FROM (
-    -- Coincidencias por IMO (lo más fiable) o por MMSI (barcos sin IMO).
     SELECT r.mmsi, r.imo, r.event_time, r.proc_time, r.ship_name AS reported_name,
-           s.os_id, s.name AS listed_name, s.risk, s.datasets, s.url, 'imo' AS matched_on
-    FROM kafka_ais AS r
-    JOIN sanctions FOR SYSTEM_TIME AS OF r.proc_time AS s ON r.imo = s.imo
-    WHERE r.message_type IN ('ShipStaticData', 'StaticDataReport') AND imo_valid(r.imo)
-    UNION ALL
-    SELECT r.mmsi, r.imo, r.event_time, r.proc_time, r.ship_name AS reported_name,
-           s.os_id, s.name AS listed_name, s.risk, s.datasets, s.url, 'mmsi' AS matched_on
-    FROM kafka_ais AS r
-    JOIN sanctions FOR SYSTEM_TIME AS OF r.proc_time AS s ON r.mmsi = s.mmsi
-    WHERE r.message_type IN ('ShipStaticData', 'StaticDataReport')
+           CASE WHEN i.imo IS NOT NULL THEN 'imo' ELSE 'mmsi' END AS matched_on,
+           COALESCE(i.os_ids, m.os_ids) AS os_ids,
+           COALESCE(i.names, m.names) AS listed_names,
+           COALESCE(i.sanctioned, m.sanctioned) AS sanctioned,
+           COALESCE(i.datasets, m.datasets) AS datasets,
+           COALESCE(i.url, m.url) AS url,
+           COALESCE(i.entries, m.entries) AS entries
+    FROM (
+      SELECT mmsi, imo, event_time, proc_time, ship_name,
+             CASE WHEN imo_valid(imo) THEN imo END AS imo_key
+      FROM kafka_ais
+      WHERE message_type IN ('ShipStaticData', 'StaticDataReport')
+    ) AS r
+    LEFT JOIN sanctions_by_imo FOR SYSTEM_TIME AS OF r.proc_time AS i ON r.imo_key = i.imo
+    LEFT JOIN sanctions_by_mmsi FOR SYSTEM_TIME AS OF r.proc_time AS m ON r.mmsi = m.mmsi
+    WHERE i.imo IS NOT NULL OR m.mmsi IS NOT NULL
   )
 )
 WHERE rn = 1;
 
 -- 3. Cambio de identidad: mismo IMO con otro nombre o con otro MMSI (otra bandera si cambia el
---    MID, los 3 primeros dígitos) dentro de 30 días.
+--    MID, los 3 primeros dígitos) dentro de 30 días. Solo cuenta una identidad nunca vista para
+--    ese IMO: hay barcos que alternan entre dos formas de escribir su nombre en cada reporte.
 INSERT INTO lake.gold.alerts
 SELECT
   MD5(CONCAT_WS('|', 'identity_change', CAST(imo AS STRING), CAST(event_time AS STRING))),
@@ -242,14 +327,199 @@ FROM (
            FIRST_VALUE(ship_name) OVER w AS prev_name,
            FIRST_VALUE(epoch_ms(event_time)) OVER w AS prev_ms,
            COUNT(*) OVER w AS n
-    FROM kafka_ais
-    WHERE message_type IN ('ShipStaticData', 'StaticDataReport')
-      AND imo_valid(imo) AND ship_name IS NOT NULL AND ship_name <> ''
-    WINDOW w AS (PARTITION BY imo ORDER BY event_ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
+    FROM (
+      -- Primera vez que se ve cada combinación (IMO, MMSI, nombre). Va por tiempo de proceso
+      -- porque deduplicar por tiempo de evento emite correcciones, y la ventana OVER no las acepta.
+      SELECT *
+      FROM (
+        SELECT *, ROW_NUMBER() OVER (PARTITION BY imo, mmsi, ship_name ORDER BY proc_time) AS rn
+        FROM kafka_ais
+        WHERE message_type IN ('ShipStaticData', 'StaticDataReport')
+          AND imo_valid(imo) AND ship_name IS NOT NULL AND ship_name <> ''
+      )
+      WHERE rn = 1
+    )
+    WINDOW w AS (PARTITION BY imo ORDER BY proc_time ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
   )
 )
 WHERE n = 2
   AND (prev_mmsi <> mmsi OR prev_name <> name)
   AND TIMESTAMPDIFF(DAY, prev_time, event_time) <= 30;
+
+-- Misma cobertura en Postgres (upsert por celda y hora) para que la consulten los apagones.
+INSERT INTO coverage_pg
+SELECT h3_r7, CAST(window_start AS TIMESTAMP(3)), COUNT(*), COUNT(DISTINCT mmsi)
+FROM (
+  SELECT window_start, window_end, mmsi, h3_cell(lat, lon, 7) AS h3_r7
+  FROM TABLE(TUMBLE(TABLE kafka_ais, DESCRIPTOR(event_ts), INTERVAL '1' HOUR))
+  WHERE message_type IN ('PositionReport', 'StandardClassBPositionReport', 'ExtendedClassBPositionReport')
+    AND lat BETWEEN -90 AND 90 AND lon BETWEEN -180 AND 180 AND NOT (lat = 0 AND lon = 0)
+)
+WHERE h3_r7 IS NOT NULL
+GROUP BY window_start, window_end, h3_r7;
+
+-- 4. Apagón de señal: un barco deja de emitir 2 horas o más fuera de puerto, y en la hora central
+--    del silencio se oía a otros barcos en la misma celda. Si no se oía a nadie, el silencio
+--    puede ser de cobertura (o de nuestro propio receptor apagado) y no se alerta.
+INSERT INTO lake.gold.alerts
+SELECT
+  MD5(CONCAT_WS('|', 'dark_gap', CAST(g.mmsi AS STRING), CAST(g.event_time AS STRING))),
+  'dark_gap', g.mmsi, CAST(NULL AS BIGINT), g.prev_time, g.event_time,
+  g.prev_lat, g.prev_lon, g.prev_h3,
+  LEAST(1.0, g.gap_h / 12.0),
+  JSON_OBJECT(
+    KEY 'gap_hours' VALUE ROUND(g.gap_h, 2),
+    KEY 'other_vessels_heard' VALUE c.vessels,
+    KEY 'messages_heard' VALUE c.messages,
+    KEY 'sog_before' VALUE g.prev_sog,
+    KEY 'reappeared_lat' VALUE g.lat,
+    KEY 'reappeared_lon' VALUE g.lon,
+    KEY 'distance_km' VALUE ROUND(haversine_km(g.prev_lat, g.prev_lon, g.lat, g.lon), 2)),
+  CAST(CURRENT_TIMESTAMP AS TIMESTAMP_LTZ(3)),
+  CAST(g.event_time AS DATE)
+FROM (
+  SELECT *,
+         h3_cell(prev_lat, prev_lon, 7) AS prev_h3,
+         h3_cell(prev_lat, prev_lon, 6) AS prev_h3_r6,
+         (epoch_ms(event_time) - prev_ms) / 3600000.0 AS gap_h,
+         -- Hora que contiene el punto medio del silencio: con 2 h o más cae entera dentro de él.
+         CAST(FLOOR(TO_TIMESTAMP_LTZ((prev_ms + epoch_ms(event_time)) / 2, 3) TO HOUR)
+              AS TIMESTAMP(3)) AS mid_hour,
+         TO_TIMESTAMP_LTZ(prev_ms, 3) AS prev_time
+  FROM (
+    SELECT mmsi, event_time, proc_time, lat, lon,
+           FIRST_VALUE(epoch_ms(event_time)) OVER w AS prev_ms,
+           FIRST_VALUE(lat) OVER w AS prev_lat,
+           FIRST_VALUE(lon) OVER w AS prev_lon,
+           FIRST_VALUE(sog) OVER w AS prev_sog,
+           COUNT(*) OVER w AS n
+    FROM kafka_ais
+    WHERE message_type IN ('PositionReport', 'StandardClassBPositionReport', 'ExtendedClassBPositionReport')
+    AND lat BETWEEN -90 AND 90 AND lon BETWEEN -180 AND 180 AND NOT (lat = 0 AND lon = 0)
+    WINDOW w AS (PARTITION BY mmsi ORDER BY event_ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
+  )
+  WHERE n = 2 AND epoch_ms(event_time) - prev_ms >= 2 * 3600 * 1000
+) AS g
+LEFT JOIN port_zone FOR SYSTEM_TIME AS OF g.proc_time AS p ON g.prev_h3_r6 = p.h3_r6
+JOIN coverage_pg FOR SYSTEM_TIME AS OF g.proc_time AS c
+  ON g.prev_h3 = c.h3_r7 AND g.mid_hour = c.window_start
+WHERE p.h3_r6 IS NULL AND c.vessels >= 2;
+
+-- 5. Encuentro en alta mar (posible transferencia barco a barco): dos barcos casi quietos
+--    (< 2 nudos, sin estar amarrados) fuera de puerto, a menos de 1 km entre sí, durante al menos
+--    90 minutos de una ventana de 2 horas. Un trasvase dura horas, así que alerta en cada ventana.
+INSERT INTO lake.gold.alerts
+SELECT
+  MD5(CONCAT_WS('|', 'sts_encounter', CAST(a.mmsi AS STRING), CAST(b.mmsi AS STRING),
+                CAST(a.window_start AS STRING))),
+  'sts_encounter', a.mmsi, CAST(NULL AS BIGINT),
+  CAST(GREATEST(a.first_ts, b.first_ts) AS TIMESTAMP_LTZ(6)),
+  CAST(LEAST(a.last_ts, b.last_ts) AS TIMESTAMP_LTZ(6)),
+  (a.lat + b.lat) / 2, (a.lon + b.lon) / 2, a.h3_r7,
+  LEAST(1.0, 0.5 + TIMESTAMPDIFF(MINUTE, GREATEST(a.first_ts, b.first_ts),
+                                 LEAST(a.last_ts, b.last_ts)) / 240.0),
+  JSON_OBJECT(
+    KEY 'other_mmsi' VALUE b.mmsi,
+    KEY 'distance_km' VALUE ROUND(haversine_km(a.lat, a.lon, b.lat, b.lon), 3),
+    KEY 'minutes_together' VALUE TIMESTAMPDIFF(MINUTE, GREATEST(a.first_ts, b.first_ts),
+                                               LEAST(a.last_ts, b.last_ts)),
+    KEY 'avg_sog' VALUE ROUND(a.avg_sog, 2),
+    KEY 'other_avg_sog' VALUE ROUND(b.avg_sog, 2)),
+  CAST(CURRENT_TIMESTAMP AS TIMESTAMP_LTZ(3)),
+  CAST(a.window_start AS DATE)
+FROM (
+  -- Por barco, celda y ventana de 2 h: posición media y cuánto tiempo estuvo quieto ahí.
+  -- (Ventanas de grupo clásicas: la TVF TUMBLE no acepta una subconsulta con lookup join.)
+  SELECT mmsi, h3_r7,
+         TUMBLE_START(event_ts, INTERVAL '2' HOUR) AS window_start,
+         TUMBLE_ROWTIME(event_ts, INTERVAL '2' HOUR) AS w_rt,
+         AVG(lat) AS lat, AVG(lon) AS lon, AVG(sog) AS avg_sog,
+         MIN(event_ts) AS first_ts, MAX(event_ts) AS last_ts
+  FROM (
+    SELECT k.mmsi, k.event_ts, k.lat, k.lon, k.sog, k.h3_r7
+    FROM (
+      SELECT mmsi, event_ts, proc_time, lat, lon, sog,
+             h3_cell(lat, lon, 7) AS h3_r7, h3_cell(lat, lon, 6) AS h3_r6
+      FROM kafka_ais
+      WHERE message_type IN ('PositionReport', 'StandardClassBPositionReport', 'ExtendedClassBPositionReport')
+    AND lat BETWEEN -90 AND 90 AND lon BETWEEN -180 AND 180 AND NOT (lat = 0 AND lon = 0)
+        AND sog < 2 AND COALESCE(nav_status, -1) <> 5
+    ) AS k
+    LEFT JOIN port_zone FOR SYSTEM_TIME AS OF k.proc_time AS p ON k.h3_r6 = p.h3_r6
+    WHERE p.h3_r6 IS NULL
+  )
+  GROUP BY mmsi, h3_r7, TUMBLE(event_ts, INTERVAL '2' HOUR)
+  HAVING TIMESTAMPDIFF(MINUTE, MIN(event_ts), MAX(event_ts)) >= 90
+) AS a
+JOIN (
+  -- Por barco, celda y ventana de 2 h: posición media y cuánto tiempo estuvo quieto ahí.
+  -- (Ventanas de grupo clásicas: la TVF TUMBLE no acepta una subconsulta con lookup join.)
+  SELECT mmsi, h3_r7,
+         TUMBLE_START(event_ts, INTERVAL '2' HOUR) AS window_start,
+         TUMBLE_ROWTIME(event_ts, INTERVAL '2' HOUR) AS w_rt,
+         AVG(lat) AS lat, AVG(lon) AS lon, AVG(sog) AS avg_sog,
+         MIN(event_ts) AS first_ts, MAX(event_ts) AS last_ts
+  FROM (
+    SELECT k.mmsi, k.event_ts, k.lat, k.lon, k.sog, k.h3_r7
+    FROM (
+      SELECT mmsi, event_ts, proc_time, lat, lon, sog,
+             h3_cell(lat, lon, 7) AS h3_r7, h3_cell(lat, lon, 6) AS h3_r6
+      FROM kafka_ais
+      WHERE message_type IN ('PositionReport', 'StandardClassBPositionReport', 'ExtendedClassBPositionReport')
+    AND lat BETWEEN -90 AND 90 AND lon BETWEEN -180 AND 180 AND NOT (lat = 0 AND lon = 0)
+        AND sog < 2 AND COALESCE(nav_status, -1) <> 5
+    ) AS k
+    LEFT JOIN port_zone FOR SYSTEM_TIME AS OF k.proc_time AS p ON k.h3_r6 = p.h3_r6
+    WHERE p.h3_r6 IS NULL
+  )
+  GROUP BY mmsi, h3_r7, TUMBLE(event_ts, INTERVAL '2' HOUR)
+  HAVING TIMESTAMPDIFF(MINUTE, MIN(event_ts), MAX(event_ts)) >= 90
+) AS b
+  -- Misma ventana (join por intervalo sobre el tiempo de la ventana: el estado se limpia solo).
+  ON a.h3_r7 = b.h3_r7
+ AND a.w_rt BETWEEN b.w_rt - INTERVAL '1' SECOND AND b.w_rt + INTERVAL '1' SECOND
+WHERE a.mmsi < b.mmsi
+  AND haversine_km(a.lat, a.lon, b.lat, b.lon) < 1.0
+  AND TIMESTAMPDIFF(MINUTE, GREATEST(a.first_ts, b.first_ts), LEAST(a.last_ts, b.last_ts)) >= 90;
+
+-- 6. Merodeo sobre un cable o ducto submarino: un barco lento (< 3 nudos) o fondeado pasa al menos
+--    30 minutos de una hora dentro de la franja de un cable, fuera de puerto. Es el patrón previo
+--    a los daños de cables en el Báltico (Balticconnector 2023, Eagle S 2024).
+INSERT INTO lake.gold.alerts
+SELECT
+  MD5(CONCAT_WS('|', 'cable_loitering', CAST(mmsi AS STRING), CAST(window_start AS STRING))),
+  'cable_loitering', mmsi, CAST(NULL AS BIGINT),
+  CAST(first_ts AS TIMESTAMP_LTZ(6)), CAST(last_ts AS TIMESTAMP_LTZ(6)), lat, lon, h3_r7,
+  LEAST(1.0, 0.4 + TIMESTAMPDIFF(MINUTE, first_ts, last_ts) / 100.0),
+  JSON_OBJECT(
+    KEY 'cables' VALUE cables,
+    KEY 'minutes_in_zone' VALUE TIMESTAMPDIFF(MINUTE, first_ts, last_ts),
+    KEY 'avg_sog' VALUE ROUND(avg_sog, 2),
+    KEY 'anchored_reports' VALUE anchored,
+    KEY 'reports' VALUE reports),
+  CAST(CURRENT_TIMESTAMP AS TIMESTAMP_LTZ(3)),
+  CAST(window_start AS DATE)
+FROM (
+  SELECT mmsi, TUMBLE_START(event_ts, INTERVAL '1' HOUR) AS window_start,
+         MAX(cables) AS cables, MAX(h3_r7) AS h3_r7, AVG(lat) AS lat, AVG(lon) AS lon,
+         AVG(sog) AS avg_sog, MIN(event_ts) AS first_ts, MAX(event_ts) AS last_ts,
+         COUNT(*) AS reports, SUM(CASE WHEN nav_status = 1 THEN 1 ELSE 0 END) AS anchored
+  FROM (
+    SELECT k.mmsi, k.event_ts, k.lat, k.lon, k.sog, k.nav_status, k.h3_r7, z.cables
+    FROM (
+      SELECT mmsi, event_ts, proc_time, lat, lon, sog, nav_status,
+             h3_cell(lat, lon, 7) AS h3_r7, h3_cell(lat, lon, 6) AS h3_r6
+      FROM kafka_ais
+      WHERE message_type IN ('PositionReport', 'StandardClassBPositionReport', 'ExtendedClassBPositionReport')
+    AND lat BETWEEN -90 AND 90 AND lon BETWEEN -180 AND 180 AND NOT (lat = 0 AND lon = 0)
+        AND (sog < 3 OR nav_status = 1)
+    ) AS k
+    JOIN cable_zone FOR SYSTEM_TIME AS OF k.proc_time AS z ON k.h3_r7 = z.h3_r7
+    LEFT JOIN port_zone FOR SYSTEM_TIME AS OF k.proc_time AS p ON k.h3_r6 = p.h3_r6
+    WHERE p.h3_r6 IS NULL
+  )
+  GROUP BY mmsi, TUMBLE(event_ts, INTERVAL '1' HOUR)
+  HAVING TIMESTAMPDIFF(MINUTE, MIN(event_ts), MAX(event_ts)) >= 30
+);
 
 END;

@@ -13,6 +13,18 @@ job_state_ok() {  # $1 = nombre del job; $2 = regex de estados aceptados
   curl -sf "$JM/jobs/overview" | tr '{' '\n' | grep "\"name\":\"$1\"" | grep -Eq "\"state\":\"($2)\""
 }
 
+cancel_old_versions() {  # $1 = prefijo del nombre, $2 = nombre de la versión actual
+  # Al cambiar las reglas, el job cambia de nombre (…-v2, -v3): el estado viejo no sirve para el
+  # SQL nuevo. Se cancela la versión anterior y la nueva sigue desde los offsets que ella dejó
+  # confirmados en Kafka (mismo consumer group).
+  curl -sf "$JM/jobs/overview" | tr '{' '\n' | grep "\"name\":\"$1" | grep -v "\"name\":\"$2\"" \
+    | grep -E '"state":"(INITIALIZING|CREATED|RUNNING|RESTARTING)"' \
+    | sed -E 's/.*"jid":"([0-9a-f]+)".*/\1/' | while read -r jid; do
+      echo "Cancelando la versión anterior del job ($jid)"
+      curl -sf -X PATCH "$JM/jobs/$jid?mode=cancel" >/dev/null || true
+    done || true
+}
+
 submit_job() {  # $1 = nombre, $2 = archivo SQL, $3 = carpeta de checkpoints del job
   local name="$1" sql="$2" ckpts="$3"
 
@@ -51,5 +63,7 @@ submit_job() {  # $1 = nombre, $2 = archivo SQL, $3 = carpeta de checkpoints del
 
 # Ingesta (bronze + silver). Usa la carpeta de checkpoints por defecto del cluster.
 submit_job "dark-fleet-radar" /opt/sql/pipeline.sql /flink-data/checkpoints
-# Detecciones (gold). Tiene su propia carpeta, fijada en detections.sql.
-submit_job "dark-fleet-radar-detections" /opt/sql/detections.sql /flink-data/checkpoints-detections
+# Detecciones (gold). Nombre y carpeta llevan la versión de las reglas (fijadas en detections.sql).
+DETECTIONS="dark-fleet-radar-detections-v2"
+cancel_old_versions "dark-fleet-radar-detections" "$DETECTIONS"
+submit_job "$DETECTIONS" /opt/sql/detections.sql /flink-data/checkpoints-detections-v2

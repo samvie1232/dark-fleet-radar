@@ -194,7 +194,7 @@ services:
   # Para refrescarla: docker compose run --rm ref-loader
   ref-loader:
     build: ./tools
-    command: ["load-sanctions"]
+    command: ["load-reference"]
     depends_on:
       postgres: { condition: service_healthy }
     restart: "no"

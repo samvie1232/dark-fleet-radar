@@ -30,7 +30,25 @@ CREATE TABLE IF NOT EXISTS sanctioned_vessels (
 );
 CREATE INDEX IF NOT EXISTS sanctioned_vessels_imo  ON sanctioned_vessels (imo);
 CREATE INDEX IF NOT EXISTS sanctioned_vessels_mmsi ON sanctioned_vessels (mmsi);
+""" + "".join(
+    f"""
+-- Una fila por barco: OpenSanctions trae una entrada por cada lista que lo nombra, y Flink debe
+-- emitir una sola alerta por barco con todas sus listas.
+CREATE OR REPLACE VIEW sanctions_by_{key} AS
+SELECT v.{key},
+       string_agg(DISTINCT v.os_id, ';') AS os_ids,
+       string_agg(DISTINCT v.name, '; ') AS names,
+       bool_or(v.risk LIKE 'sanction%') AS sanctioned,
+       string_agg(DISTINCT d.ds, ';') AS datasets,
+       min(v.url) AS url,
+       count(DISTINCT v.os_id) AS entries
+FROM sanctioned_vessels AS v
+LEFT JOIN LATERAL regexp_split_to_table(v.datasets, ';') AS d(ds) ON true
+WHERE v.{key} IS NOT NULL
+GROUP BY v.{key};
 """
+    for key in ("imo", "mmsi")
+)
 
 
 @dataclass(frozen=True)

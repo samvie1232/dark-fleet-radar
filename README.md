@@ -5,9 +5,8 @@ comportamientos sospechosos (apagones de señal, spoofing, transferencias en alt
 identidad, barcos sancionados) y los muestra en un mapa, con métricas que prueban que las alertas
 funcionan.
 
-> Estado: **paso 3 de 4, primera mitad**. Ingesta exactly-once a Iceberg, mapa de cobertura H3 y
-> tres detecciones (spoofing, barcos sancionados, cambios de identidad). Siguen apagones de señal,
-> transferencias entre barcos y merodeo cerca de cables, y luego la validación con precision/recall.
+> Estado: **paso 3 de 4**. Ingesta exactly-once a Iceberg, mapa de cobertura H3 y seis
+> detecciones en streaming. Sigue el paso 4: mapa, Grafana y validación con precision/recall.
 
 ## Arquitectura
 
@@ -30,7 +29,7 @@ aisstream.io (WebSocket, Báltico + Mar del Norte)
      ├─ ais.vessel_static_reports   silver: IMO, nombre, indicativo, tipo, destino, calado
      │
      │  Segundo job de Flink (flink/sql/detections.sql), mismo topic, otro consumer group
-     │        └─ consulta OpenSanctions en Postgres (lookup join con caché de 1 h)
+     │        └─ consulta en Postgres OpenSanctions, puertos, cables y cobertura (lookup joins)
      ├─ gold.coverage_h3            mensajes y barcos por celda H3 (resolución 7) y hora
      └─ gold.alerts                 una fila por alerta, con puntaje y evidencia en JSON
 ```
@@ -101,11 +100,23 @@ así que si una alerta se escribiera dos veces se reconoce como la misma.
 | Alerta | Regla | Puntaje |
 |---|---|---|
 | `spoofing_jump` | Entre dos posiciones seguidas del mismo MMSI haría falta ir a más de 50 nudos, con un salto de más de 2 km (ningún mercante pasa de unos 30 nudos; los 2 km evitan confundir ruido de GPS con un salto) | velocidad / 100, máximo 1 |
-| `sanctioned_vessel` | El IMO (con dígito de control válido) o el MMSI de un reporte estático aparece en la lista marítima de [OpenSanctions](https://www.opensanctions.org/datasets/maritime/). Una alerta por barco y entrada de la lista | 1,0 si está sancionado, 0,7 si es otro riesgo |
-| `identity_change` | Mismo IMO con otro nombre u otro MMSI en menos de 30 días | 0,9 si cambia la bandera (MID), 0,7 si cambia el MMSI, 0,5 si solo el nombre |
+| `sanctioned_vessel` | El IMO (con dígito de control válido) o el MMSI de un reporte estático aparece en la lista marítima de [OpenSanctions](https://www.opensanctions.org/datasets/maritime/). Una alerta por barco, con todas las listas que lo nombran | 1,0 si está sancionado, 0,7 si es otro riesgo |
+| `identity_change` | Mismo IMO con un nombre o MMSI nunca visto antes para ese IMO, en menos de 30 días (los barcos que alternan entre dos formas de escribir su nombre no alertan cada vez) | 0,9 si cambia la bandera (MID), 0,7 si cambia el MMSI, 0,5 si solo el nombre |
+| `dark_gap` | Un barco calla 2 horas o más fuera de puerto **y** en la hora central del silencio se oía a otros 2 barcos o más en su misma celda H3. Si no se oía a nadie, el silencio puede ser de cobertura (o del propio receptor apagado) y no alerta | horas de silencio / 12, máximo 1 |
+| `sts_encounter` | Dos barcos a menos de 2 nudos (sin estar amarrados), fuera de puerto, a menos de 1 km entre sí durante al menos 90 minutos de una ventana de 2 h: posible transferencia barco a barco. Alerta en cada ventana mientras dure | 0,5 + minutos juntos / 240, máximo 1 |
+| `cable_loitering` | Un barco lento (< 3 nudos) o fondeado pasa 30 minutos o más de una hora dentro de la franja (~3 km) de un cable o ducto submarino, fuera de puerto. Es el patrón previo a los daños del Balticconnector (2023) y del Eagle S (2024) | 0,4 + minutos / 100, máximo 1 |
+
+Zonas de referencia (`tools/src/radar_tools/geo.py`, como celdas H3 en Postgres): 49 puertos del Mar
+del Norte y el Báltico (unos 10 km alrededor) y 9 cables y ductos (Balticconnector, Estlink 1 y 2,
+C-Lion1, Nord Stream, BCS, NordBalt, NorNed, North Sea Link). **Los trazados son aproximados**, unos
+pocos puntos por cable; para algo serio habría que cargar el trazado real (por ejemplo de EMODnet).
+
+Cuando se cambian las reglas, el job de detecciones sube de versión (`dark-fleet-radar-detections-v2`):
+`flink-job` cancela la versión anterior y la nueva sigue desde los offsets que esa dejó en Kafka.
 
 La lista de OpenSanctions se descarga y se carga en Postgres al arrancar (servicio `ref-loader`).
-Para refrescarla: `docker compose --profile tools run --rm tools load-sanctions`.
+Para refrescarla: `docker compose --profile tools run --rm tools load-sanctions`. El mismo servicio carga
+las zonas de puertos y de cables submarinos (`tools/src/radar_tools/geo.py`).
 
 Funciones propias en Java (`flink/udf/`, se compilan y se prueban al construir la imagen):
 `h3_cell` (celda H3), `haversine_km`, `implied_speed_kn`, `imo_valid` y `epoch_ms`.
@@ -116,9 +127,14 @@ Ver las alertas (conteo por tipo y las 20 más recientes):
 docker compose --profile tools run --rm tools alerts
 ```
 
-**Nota técnica:** en Flink 1.20 el sql-client falla ("belongs to a different planner") si se usan
-vistas temporales dentro de un `STATEMENT SET`, así que los campos del JSON se sacan como columnas
-calculadas de la tabla fuente y cada consulta va completa en su `INSERT`.
+**Notas técnicas (Flink 1.20):**
+- El sql-client falla ("belongs to a different planner") con vistas temporales que llaman funciones
+  propias o hacen lookup joins, así que los campos del JSON son columnas calculadas de la tabla
+  fuente y cada consulta va completa en su `INSERT`.
+- La TVF `TUMBLE` no acepta una subconsulta con lookup join, y aplicarla antes del join convierte la
+  agregación en una que emite correcciones (que Iceberg en modo append no acepta). Para encuentros y
+  cables se usan las ventanas de grupo clásicas (`GROUP BY TUMBLE(...)`), y el par de barcos se arma
+  con un join por intervalo sobre el tiempo de la ventana.
 
 ## Qué hace el productor
 
