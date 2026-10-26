@@ -248,6 +248,8 @@ services:
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/dark-fleet-radar.json
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      # El mapa base por defecto (CARTO) ahora pide clave; se usa OpenStreetMap.
+      GF_GEOMAP_DEFAULT_BASEMAP: '{"type": "osm-standard", "config": {}}'
     volumes:
       - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro

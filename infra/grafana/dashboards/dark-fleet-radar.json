@@ -438,8 +438,8 @@
           "mouseWheelZoom": true
         },
         "basemap": {
-          "type": "default",
-          "name": "Mapa base"
+          "type": "osm-standard",
+          "name": "OpenStreetMap"
         },
         "layers": [
           {
@@ -517,8 +517,8 @@
           "mouseWheelZoom": true
         },
         "basemap": {
-          "type": "default",
-          "name": "Mapa base"
+          "type": "osm-standard",
+          "name": "OpenStreetMap"
         },
         "layers": [
           {
