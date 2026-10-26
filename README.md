@@ -5,10 +5,10 @@ comportamientos sospechosos (apagones de señal, spoofing, transferencias en alt
 identidad, barcos sancionados) y los muestra en un mapa, con métricas que prueban que las alertas
 funcionan.
 
-> Estado: **paso 1 de 4, ingesta**. aisstream.io → productor Python → Redpanda.
-> Siguen Flink + Iceberg, cobertura H3 y detecciones, y validación con precision/recall.
+> Estado: **paso 2 de 4**. aisstream.io → productor Python → Redpanda → Flink → Iceberg.
+> Siguen cobertura H3 y detecciones, y validación con precision/recall.
 
-## Arquitectura (paso 1)
+## Arquitectura
 
 ```
 aisstream.io (WebSocket, Báltico + Mar del Norte)
@@ -18,13 +18,22 @@ aisstream.io (WebSocket, Báltico + Mar del Norte)
         │            └─► :8000/metrics                    (Prometheus)
         ▼
   Redpanda ── ais.raw (6 particiones, 7 días)   ais.dlq (mensajes inválidos + motivo)
+        │
+        ▼
+  Flink SQL (flink/sql/pipeline.sql) ── tiempo de evento, watermark de 1 min,
+        │                                checkpoints exactly-once cada 60 s
+        ▼
+  Iceberg (catálogo REST) sobre S3 local (SeaweedFS)
+     ├─ ais.ais_raw                 bronze: cada registro de Kafka una vez, con partición y offset
+     ├─ ais.positions               silver: lat/lon/SOG/COG tipados, banderas de calidad, sin duplicados
+     └─ ais.vessel_static_reports   silver: IMO, nombre, indicativo, tipo, destino, calado
 ```
 
 aisstream no tiene SLA ni replay, por eso todo se persiste en Kafka y en disco antes de procesarlo.
 
 ## Cómo correrlo
 
-Requisitos: Docker, 8 GB de RAM como mínimo (16 GB recomendados) y una API key gratuita de
+Requisitos: Docker con unos 6 GB de RAM asignados (PC de 16 GB recomendado) y una API key gratuita de
 [aisstream.io](https://aisstream.io).
 
 ```bash
@@ -33,6 +42,8 @@ docker compose up -d --build
 docker compose logs -f producer
 ```
 
+- Flink (job, checkpoints, backpressure): http://localhost:8081
+- Resumen del lago: `docker compose --profile tools run --rm tools summary`
 - Consola de Redpanda (topics y mensajes): http://localhost:8090 (cámbialo con `CONSOLE_PORT` en `.env`)
 - Métricas del productor: http://localhost:8000/metrics
 - Grabaciones: `data/raw/`
@@ -45,6 +56,35 @@ duckdb -c ".read scripts/explore.sql"
 
 Cambiar de región: edita `AIS_BOUNDING_BOXES` en `.env`, por ejemplo el Caribe colombiano y la
 entrada del Canal de Panamá: `[[[7.0, -82.0], [13.5, -74.0]]]`.
+
+## Exactly-once y prueba de caos
+
+Flink guarda los offsets de Kafka y el estado en cada checkpoint (cada 60 s), e Iceberg hace un
+commit por checkpoint. Si Flink se cae, retoma desde el último checkpoint: lo que no se confirmó
+se vuelve a leer y lo que sí se confirmó no se repite.
+
+La tabla bronze guarda la partición y el offset de cada registro, así que se puede probar:
+
+```bash
+docker compose --profile tools run --rm tools verify
+```
+
+revisa que en cada partición no haya offsets repetidos (duplicados) ni saltos (pérdidas).
+
+Prueba de caos: `./scripts/chaos_test.sh` (o `.\scripts\chaos_test.ps1` en Windows) mata el
+TaskManager a mitad de camino, lo levanta y vuelve a verificar. Resultado en desarrollo:
+
+| Momento | Filas en bronze | Duplicados | Huecos |
+|---|---|---|---|
+| Antes de matar el TaskManager | 34.000 | 0 | 0 |
+| Después de recuperarse | 52.000 | 0 | 0 |
+| Tras reiniciar todo Flink (retoma desde el checkpoint) | 64.560 | 0 | 0 |
+
+Si apagas el PC, al volver corre `docker compose up -d`: el servicio `flink-job` encuentra el
+último checkpoint y retoma desde ahí, y si el job ya está corriendo no envía otro.
+
+**Decisión de diseño, S3 local:** el brief original usaba MinIO, pero MinIO dejó de publicar
+imágenes en Docker Hub. Iceberg solo necesita una API S3, así que se usa SeaweedFS (Apache 2.0).
 
 ## Qué hace el productor
 
@@ -61,7 +101,7 @@ entrada del Canal de Panamá: `[[[7.0, -82.0], [13.5, -74.0]]]`.
 ## Desarrollo
 
 ```bash
-cd producer
+cd producer            # o cd tools
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements-dev.txt
 pytest -q && ruff check .

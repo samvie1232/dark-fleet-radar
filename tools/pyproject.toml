@@ -1,0 +1,15 @@
+[project]
+name = "radar-tools"
+version = "0.1.0"
+description = "Utilidades del lago Iceberg de Dark Fleet Radar (bucket, verificación, consultas)"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

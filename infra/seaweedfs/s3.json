@@ -1,0 +1,11 @@
+{
+  "identities": [
+    {
+      "name": "radar",
+      "credentials": [
+        { "accessKey": "radar", "secretKey": "radar-local-secret" }
+      ],
+      "actions": ["Admin", "Read", "List", "Tagging", "Write"]
+    }
+  ]
+}
