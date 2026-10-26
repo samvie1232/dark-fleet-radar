@@ -79,13 +79,14 @@ docker compose --profile tools run --rm tools verify
 revisa que en cada partición no haya offsets repetidos (duplicados) ni saltos (pérdidas).
 
 Prueba de caos: `./scripts/chaos_test.sh` (o `.\scripts\chaos_test.ps1` en Windows) mata el
-TaskManager a mitad de camino, lo levanta y vuelve a verificar. Resultado en desarrollo:
+TaskManager a mitad de camino, muestra cómo los dos jobs pasan a `RESTARTING` y vuelven a `RUNNING`
+desde el último checkpoint, espera dos checkpoints nuevos y vuelve a verificar:
 
-| Momento | Filas en bronze | Duplicados | Huecos |
-|---|---|---|---|
-| Antes de matar el TaskManager | 34.000 | 0 | 0 |
-| Después de recuperarse | 52.000 | 0 | 0 |
-| Tras reiniciar todo Flink (retoma desde el checkpoint) | 64.560 | 0 | 0 |
+![Prueba de caos: se mata el TaskManager, Flink retoma desde el checkpoint y la tabla bronze queda sin duplicados ni huecos](docs/chaos_test.gif)
+
+(Grabada en el entorno de desarrollo con un feed AIS simulado; las esperas largas van aceleradas.)
+Entre las dos verificaciones entraron 14.099 filas más y siguen en 0 duplicados y 0 huecos en las
+6 particiones.
 
 Si apagas el PC, al volver corre `docker compose up -d`: el servicio `flink-job` encuentra el
 último checkpoint y retoma desde ahí, y si el job ya está corriendo no envía otro.
