@@ -82,9 +82,9 @@ offsets (duplicates) or jumps (losses).
 
 Chaos test: `./scripts/chaos_test.sh` (or `.\scripts\chaos_test.ps1` on Windows) kills the
 TaskManager mid-stream, shows both jobs going to `RESTARTING` and back to `RUNNING` from the last
-checkpoint, waits for two new checkpoints and verifies again. That is the GIF at the top (recorded in
-the dev environment with a simulated AIS feed; long waits are fast-forwarded). Between the two checks
-14,099 more rows arrived, still with 0 duplicates and 0 gaps across the 6 partitions.
+checkpoint, waits for two new checkpoints and verifies again. That is the GIF at the top, run on
+real Baltic and North Sea AIS data (long waits are fast-forwarded): the table grew from 1,137,192 to
+1,146,508 rows during the test and still had 0 duplicates and 0 gaps across the 6 partitions.
 
 **Design decision, local S3:** the original brief used MinIO, but MinIO stopped publishing images
 on Docker Hub. Iceberg only needs an S3 API, so SeaweedFS (Apache 2.0) is used instead.
