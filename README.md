@@ -1,5 +1,7 @@
 # Dark Fleet Radar
 
+*[Read in English](README.en.md)*
+
 Radar de "flotas fantasma" en tiempo real: recibe en vivo las señales AIS de los barcos, detecta
 comportamientos sospechosos (apagones de señal, spoofing, transferencias en alta mar, cambios de
 identidad, barcos sancionados) y los muestra en un mapa, con métricas que prueban que las alertas
