@@ -2,7 +2,7 @@
 $ErrorActionPreference = "Stop"
 
 Write-Host "1) Estado antes del fallo"
-docker compose --profile tools run --rm tools verify
+docker compose --profile tools run --rm --build tools verify
 
 Write-Host "2) Matando el TaskManager (como si se cayera la maquina)..."
 docker compose kill flink-taskmanager
