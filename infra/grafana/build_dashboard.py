@@ -172,7 +172,7 @@ panels = [
         options={
             "view": {"id": "coords", "lat": 57, "lon": 13, "zoom": 4.3},
             "controls": {"showZoom": True, "mouseWheelZoom": True},
-            "basemap": {"type": "default", "name": "Mapa base"},
+            "basemap": {"type": "osm-standard", "name": "OpenStreetMap"},
             "layers": [
                 {
                     "type": "markers",
@@ -217,7 +217,7 @@ panels = [
         options={
             "view": {"id": "coords", "lat": 57, "lon": 13, "zoom": 3.6},
             "controls": {"showZoom": True, "mouseWheelZoom": True},
-            "basemap": {"type": "default", "name": "Mapa base"},
+            "basemap": {"type": "osm-standard", "name": "OpenStreetMap"},
             "layers": [
                 {
                     "type": "heatmap",
