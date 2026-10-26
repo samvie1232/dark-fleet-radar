@@ -1,5 +1,7 @@
 # Dark Fleet Radar
 
+*[Read in English](README.en.md)*
+
 Radar de "flotas fantasma" en tiempo real: recibe en vivo las señales AIS de los barcos, detecta
 comportamientos sospechosos (apagones de señal, spoofing, transferencias en alta mar, cambios de
 identidad, barcos sancionados) y los muestra en un mapa, con métricas que prueban que las alertas
@@ -92,9 +94,9 @@ revisa que en cada partición no haya offsets repetidos (duplicados) ni saltos (
 Prueba de caos: `./scripts/chaos_test.sh` (o `.\scripts\chaos_test.ps1` en Windows) mata el
 TaskManager a mitad de camino, muestra cómo los dos jobs pasan a `RESTARTING` y vuelven a `RUNNING`
 desde el último checkpoint, espera dos checkpoints nuevos y vuelve a verificar. Es el GIF del
-inicio (grabado en el entorno de desarrollo con un feed AIS simulado; las esperas largas van aceleradas).
-Entre las dos verificaciones entraron 14.099 filas más y siguen en 0 duplicados y 0 huecos en las
-6 particiones.
+inicio, con datos AIS reales del Báltico y el Mar del Norte (las esperas largas van aceleradas):
+la tabla pasó de 1.137.192 a 1.146.508 filas durante la prueba y siguió con 0 duplicados y 0 huecos
+en las 6 particiones.
 
 Si apagas el PC, al volver corre `docker compose up -d`: el servicio `flink-job` encuentra el
 último checkpoint y retoma desde ahí, y si el job ya está corriendo no envía otro.
