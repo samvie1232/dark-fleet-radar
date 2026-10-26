@@ -1,0 +1,88 @@
+{
+  "meta": {
+    "run_at": "2026-10-26 21:12 UTC",
+    "hours": 12,
+    "messages": 58771,
+    "seed": 42
+  },
+  "result": {
+    "spoofing_jump": {
+      "positives": 12,
+      "negatives": 12,
+      "tp": 12,
+      "fp": 0,
+      "fp_on_hard_negatives": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "alerts_per_detected_case": 1.0,
+      "missed": [],
+      "false_alarms": []
+    },
+    "dark_gap": {
+      "positives": 12,
+      "negatives": 12,
+      "tp": 12,
+      "fp": 0,
+      "fp_on_hard_negatives": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "alerts_per_detected_case": 1.0,
+      "missed": [],
+      "false_alarms": []
+    },
+    "sts_encounter": {
+      "positives": 12,
+      "negatives": 28,
+      "tp": 12,
+      "fp": 0,
+      "fp_on_hard_negatives": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "alerts_per_detected_case": 1.5833333333333333,
+      "missed": [],
+      "false_alarms": []
+    },
+    "cable_loitering": {
+      "positives": 12,
+      "negatives": 12,
+      "tp": 12,
+      "fp": 0,
+      "fp_on_hard_negatives": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "alerts_per_detected_case": 2.5,
+      "missed": [],
+      "false_alarms": []
+    },
+    "sanctioned_vessel": {
+      "positives": 2,
+      "negatives": 12,
+      "tp": 2,
+      "fp": 0,
+      "fp_on_hard_negatives": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "alerts_per_detected_case": 1.0,
+      "missed": [],
+      "false_alarms": []
+    },
+    "identity_change": {
+      "positives": 12,
+      "negatives": 12,
+      "tp": 12,
+      "fp": 0,
+      "fp_on_hard_negatives": 0,
+      "fn": 0,
+      "precision": 1.0,
+      "recall": 1.0,
+      "alerts_per_detected_case": 1.0,
+      "missed": [],
+      "false_alarms": []
+    }
+  }
+}

@@ -171,9 +171,19 @@ deben alertar:
 
 Resultado (`reports/evaluation.md`):
 
-TABLA
+| Alerta | Positivos | Negativos difíciles | Precision | Recall | Alertas por caso |
+|---|---|---|---|---|---|
+| `spoofing_jump` | 12 | 12 | 100 % | 100 % | 1.0 |
+| `dark_gap` | 12 | 12 | 100 % | 100 % | 1.0 |
+| `sts_encounter` | 12 | 28 | 100 % | 100 % | 1.6 |
+| `cable_loitering` | 12 | 12 | 100 % | 100 % | 2.5 |
+| `sanctioned_vessel` | 2 | 12 | 100 % | 100 % | 1.0 |
+| `identity_change` | 12 | 12 | 100 % | 100 % | 1.0 |
+
+En encuentros, los negativos se cuentan por barco: cada fondeadero aporta 9.
 
 La evaluación ya sirvió: la primera corrida dio 0 % de recall en apagones y 17 % en encuentros.
+Esto es lo que se corrigió:
 - **Apagones:** la cobertura se miraba en la misma celda H3 de resolución 7 (~5 km²), y en mar
   abierto casi nunca hay otro barco en una celda tan chica en la misma hora. Ahora se mira por
   zona (resolución 5, ~250 km²).
@@ -188,7 +198,9 @@ La evaluación ya sirvió: la primera corrida dio 0 % de recall en apagones y 17
   azar. Ahora los IMO del generador son únicos.
 
 "Alertas por caso" mayor que 1 es esperable en encuentros y cables: alertan una vez por ventana
-(2 h y 1 h) mientras dure el patrón.
+mientras dure el patrón (encuentros cada 2 h; cables en ventanas de 1 h que se solapan cada 30 min).
+Un 100 % aquí quiere decir que cada regla hace lo que dice sobre estos casos, no que acierte siempre
+con datos reales.
 
 Para correrla (con el stack levantado; tarda unos 15 minutos y no toca los datos reales):
 
