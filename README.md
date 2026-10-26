@@ -16,6 +16,8 @@ funcionan.
 | Precision / recall | 100 % / 100 % en las 6 reglas sobre 150 barcos etiquetados (positivos y negativos difíciles) ([evaluación](#evaluación-precision-y-recall)) |
 | Datos reales | Báltico y Mar del Norte en vivo: unos 3.000 mensajes AIS por minuto en un PC de 16 GB |
 
+![Tablero de Grafana con datos reales del Báltico y el Mar del Norte: alertas en el mapa, cobertura H3, alertas por tipo y salud del pipeline](docs/grafana.png)
+
 ![Prueba de caos: se mata el TaskManager, Flink retoma desde el checkpoint y la tabla bronze queda sin duplicados ni huecos](docs/chaos_test.gif)
 
 ## Arquitectura
@@ -124,7 +126,7 @@ así que si una alerta se escribiera dos veces se reconoce como la misma.
 |---|---|---|
 | `spoofing_jump` | Entre dos posiciones seguidas del mismo MMSI haría falta ir a más de 50 nudos, con un salto de más de 2 km (ningún mercante pasa de unos 30 nudos; los 2 km evitan confundir ruido de GPS con un salto). Una alerta por episodio: solo el primer salto tras 6 h sin saltos de ese barco | velocidad / 100, máximo 1 |
 | `sanctioned_vessel` | El IMO (con dígito de control válido) o el MMSI de un reporte estático aparece en la lista marítima de [OpenSanctions](https://www.opensanctions.org/datasets/maritime/). Una alerta por barco, con todas las listas que lo nombran | 1,0 si está sancionado, 0,7 si es otro riesgo |
-| `identity_change` | Mismo IMO con un nombre o MMSI nunca visto antes para ese IMO, en menos de 30 días (los barcos que alternan entre dos formas de escribir su nombre no alertan cada vez) | 0,9 si cambia la bandera (MID), 0,7 si cambia el MMSI, 0,5 si solo el nombre |
+| `identity_change` | Mismo IMO con un nombre o MMSI nunca visto antes para ese IMO, en menos de 30 días (el nombre se compara sin importar el orden de las palabras, mayúsculas ni signos: "VLI-25 CINDY" = "CINDY VLI-25"; y alternar entre dos formas ya vistas no vuelve a alertar) | 0,9 si cambia la bandera (MID), 0,7 si cambia el MMSI, 0,5 si solo el nombre |
 | `dark_gap` | Un barco calla 2 horas o más fuera de puerto **y** en la hora central del silencio se oía a otros 2 barcos o más en su misma zona (celda H3 de resolución 5, unos 250 km²; una celda chica casi nunca tiene a otro barco en la misma hora en mar abierto). Si no se oía a nadie, el silencio puede ser de cobertura (o del propio receptor apagado) y no alerta | horas de silencio / 12, máximo 1 |
 | `sts_encounter` | Dos barcos a menos de 2 nudos (sin estar amarrados), fuera de puerto, a menos de 1 km entre sí durante al menos 90 minutos de una ventana de 2 h: posible transferencia barco a barco. Los pares se buscan entre celdas H3 vecinas, así que dos barcos a la deriva no se pierden por caer a ambos lados de un borde. No cuenta si en la celda (~36 km²) hay más de 4 barcos quietos: eso es un fondeadero o una zona de espera. Alerta en cada ventana mientras dure | 0,5 + minutos juntos / 240, máximo 1 |
 | `cable_loitering` | Un barco lento (< 3 nudos) o fondeado pasa 30 minutos o más de una hora (ventanas de 1 h que avanzan cada 30 min) dentro de la franja (~3 km) de un cable o ducto submarino, fuera de puerto. Es el patrón previo a los daños del Balticconnector (2023) y del Eagle S (2024) | 0,4 + minutos / 100, máximo 1 |
@@ -134,7 +136,7 @@ del Norte y el Báltico (unos 10 km alrededor) y 9 cables y ductos (Balticconnec
 C-Lion1, Nord Stream, BCS, NordBalt, NorNed, North Sea Link). **Los trazados son aproximados**, unos
 pocos puntos por cable; para algo serio habría que cargar el trazado real (por ejemplo de EMODnet).
 
-Cuando se cambian las reglas, el job de detecciones sube de versión (hoy `dark-fleet-radar-detections-v4`):
+Cuando se cambian las reglas, el job de detecciones sube de versión (hoy `dark-fleet-radar-detections-v5`):
 `flink-job` cancela la versión anterior y la nueva sigue desde los offsets que esa dejó en Kafka.
 
 La lista de OpenSanctions se descarga y se carga en Postgres al arrancar (servicio `ref-loader`).
@@ -142,7 +144,7 @@ Para refrescarla: `docker compose --profile tools run --rm tools load-sanctions`
 las zonas de puertos y de cables submarinos (`tools/src/radar_tools/geo.py`).
 
 Funciones propias en Java (`flink/udf/`, se compilan y se prueban al construir la imagen):
-`h3_cell` (celda H3), `h3_disk` (una celda y sus vecinas), `haversine_km`, `implied_speed_kn`, `imo_valid` y `epoch_ms`.
+`h3_cell` (celda H3), `h3_disk` (una celda y sus vecinas), `haversine_km`, `implied_speed_kn`, `imo_valid`, `name_key` (clave del nombre sin orden de palabras ni signos) y `epoch_ms`.
 
 Ver las alertas (conteo por tipo y las 20 más recientes):
 
@@ -178,7 +180,7 @@ deben alertar:
 | `sts_encounter` | Dos barcos a 0,1-0,8 km, a menos de 1,5 nudos, 3 a 5 h | A 2,5 km, en puerto, solo 60 min, convoy a 9 nudos, fondeadero con 9 barcos |
 | `cable_loitering` | Barco lento sobre un cable 45 a 120 min | Cruza a 10 nudos, solo 20 min, lento pero lejos del cable |
 | `sanctioned_vessel` | IMO de la lista cargada (hay 2 en la lista de ejemplo) | IMO válido que no está en la lista |
-| `identity_change` | Mismo IMO con otro MMSI y bandera | Misma identidad todo el tiempo, mismo nombre con otras mayúsculas y espacios |
+| `identity_change` | Mismo IMO con otro MMSI y bandera | Misma identidad todo el tiempo, mismo nombre con otras mayúsculas y espacios, mismo nombre con las palabras en otro orden |
 
 Resultado (`reports/evaluation.md`):
 
@@ -186,7 +188,7 @@ Resultado (`reports/evaluation.md`):
 |---|---|---|---|---|---|
 | `spoofing_jump` | 12 | 12 | 100 % | 100 % | 1.0 |
 | `dark_gap` | 12 | 12 | 100 % | 100 % | 1.0 |
-| `sts_encounter` | 12 | 28 | 100 % | 100 % | 1.6 |
+| `sts_encounter` | 12 | 28 | 100 % | 100 % | 1.3 |
 | `cable_loitering` | 12 | 12 | 100 % | 100 % | 2.5 |
 | `sanctioned_vessel` | 2 | 12 | 100 % | 100 % | 1.0 |
 | `identity_change` | 12 | 12 | 100 % | 100 % | 1.0 |
@@ -240,6 +242,8 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements-dev.txt
 pytest -q && ruff check .
 ```
+
+El código se escribió con [Claude Code](https://claude.com/claude-code) como asistente (por eso aparece como coautor en los commits). El diseño, las decisiones de arquitectura y la validación con datos reales (prueba de caos, evaluación y revisión de las alertas reales que llevaron a corregir reglas) son míos.
 
 ## Limitaciones conocidas
 

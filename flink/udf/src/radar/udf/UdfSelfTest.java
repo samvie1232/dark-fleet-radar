@@ -52,6 +52,12 @@ public class UdfSelfTest {
         check("H3 disco cubre todo punto a 1 km", neighbours);
         check("H3 disco nulos", disk.cells(null, 1.0, 6, 1).isEmpty());
 
+        // NameKey: mismo nombre con otro orden, caja, guiones o espacios = misma clave.
+        check("nombre en otro orden", NameKey.key("VLI-25 CINDY").equals(NameKey.key("CINDY VLI-25")));
+        check("nombre con caja y espacios", NameKey.key("  Eval Same 3 ").equals(NameKey.key("EVAL SAME 3")));
+        check("nombre distinto", !NameKey.key("EVAL OLD 1").equals(NameKey.key("EVAL NEW 1")));
+        check("nombre vacío o nulo", NameKey.key("  - ") == null && NameKey.key(null) == null);
+
         // EpochMillis
         check("epoch millis", new EpochMillis().eval(java.time.Instant.parse("2026-10-26T15:00:00.123Z")) == 1793026800123L);
         check("epoch millis nulo", new EpochMillis().eval(null) == null);

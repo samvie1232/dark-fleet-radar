@@ -15,6 +15,8 @@ shows it on a map, with metrics that prove the alerts work.
 | Precision / recall | 100 % / 100 % on all 6 rules over 150 labelled vessels (positives and hard negatives) ([evaluation](#evaluation-precision-and-recall)) |
 | Real data | Live Baltic and North Sea traffic: about 3,000 AIS messages per minute on a 16 GB PC |
 
+![Grafana dashboard on real Baltic and North Sea data: alert map, H3 coverage, alerts by type and pipeline health](docs/grafana.png)
+
 ![Chaos test: the TaskManager is killed, Flink resumes from its checkpoint and the bronze table ends with no duplicates or gaps](docs/chaos_test.gif)
 
 ## Architecture
@@ -109,7 +111,7 @@ is recognised as the same one.
 |---|---|---|
 | `spoofing_jump` | Two consecutive positions of the same MMSI would require more than 50 knots, with a jump over 2 km (no merchant ship goes much faster than 30 knots; the 2 km avoids mistaking GPS noise for a jump). One alert per episode: only the first jump after 6 h without jumps | speed / 100, max 1 |
 | `sanctioned_vessel` | The IMO (with a valid check digit) or MMSI of a static report is on the [OpenSanctions](https://www.opensanctions.org/datasets/maritime/) maritime list. One alert per vessel, listing every source that names it | 1.0 if sanctioned, 0.7 for other risk |
-| `identity_change` | Same IMO with a name or MMSI never seen before for that IMO, within 30 days (vessels that alternate between two spellings of their name don't alert every time) | 0.9 if the flag (MID) changes, 0.7 if the MMSI changes, 0.5 name only |
+| `identity_change` | Same IMO with a name or MMSI never seen before for that IMO, within 30 days (names are compared ignoring word order, case and symbols: "VLI-25 CINDY" = "CINDY VLI-25"; and switching back to a spelling already seen doesn't alert again) | 0.9 if the flag (MID) changes, 0.7 if the MMSI changes, 0.5 name only |
 | `dark_gap` | A vessel goes silent for 2 hours or more outside port **and** in the middle hour of the silence 2 or more other vessels were heard in the same zone (H3 resolution 5 cell, about 250 km²). If nobody was heard, the silence may be a coverage gap and it doesn't alert | hours silent / 12, max 1 |
 | `sts_encounter` | Two vessels under 2 knots (not moored), outside port, less than 1 km apart for at least 90 minutes of a 2 h window: a possible ship-to-ship transfer. Pairs are matched across neighbouring H3 cells, so drifting ships on either side of a border aren't missed. It doesn't count when the cell (~36 km²) has more than 4 stationary vessels: that is an anchorage or waiting area | 0.5 + minutes together / 240, max 1 |
 | `cable_loitering` | A slow (< 3 knots) or anchored vessel spends 30 minutes or more of an hour (1 h windows sliding every 30 min) inside the ~3 km band of an undersea cable or pipeline, outside port. This is the pattern seen before the Balticconnector (2023) and Eagle S (2024) incidents | 0.4 + minutes / 100, max 1 |
@@ -119,11 +121,11 @@ Baltic ports (about 10 km around each) and 9 cables and pipelines (Balticconnect
 C-Lion1, Nord Stream, BCS, NordBalt, NorNed, North Sea Link). **Routes are approximate**, a few points
 per cable; for serious use, load the real routes (e.g. from EMODnet).
 
-When rules change, the detections job gets a new version (currently `dark-fleet-radar-detections-v4`):
+When rules change, the detections job gets a new version (currently `dark-fleet-radar-detections-v5`):
 `flink-job` cancels the previous version and the new one continues from the offsets it left in Kafka.
 
 Custom Java functions (`flink/udf/`, compiled and self-tested when the image is built): `h3_cell`,
-`h3_disk` (a cell and its neighbours), `haversine_km`, `implied_speed_kn`, `imo_valid` and `epoch_ms`.
+`h3_disk` (a cell and its neighbours), `haversine_km`, `implied_speed_kn`, `imo_valid`, `name_key` (a name key that ignores word order and symbols) and `epoch_ms`.
 
 See the alerts (count per type and the 20 most recent):
 `docker compose --profile tools run --rm tools alerts`
@@ -155,7 +157,7 @@ Each type has 12 positive cases and 12 hard negatives that look like a positive 
 | `sts_encounter` | Two vessels 0.1–0.8 km apart under 1.5 kn for 3 to 5 h | 2.5 km apart, in port, only 60 min, 9 kn convoy, anchorage with 9 ships |
 | `cable_loitering` | Slow vessel over a cable for 45 to 120 min | Crossing at 10 kn, only 20 min, slow but far from any cable |
 | `sanctioned_vessel` | IMO from the loaded list (2 in the sample list) | Valid IMO not on the list |
-| `identity_change` | Same IMO with another MMSI and flag | Same identity throughout, same name with different case and spacing |
+| `identity_change` | Same IMO with another MMSI and flag | Same identity throughout, same name with different case and spacing, same name with the words in another order |
 
 Result (`reports/evaluation.md`):
 
@@ -163,7 +165,7 @@ Result (`reports/evaluation.md`):
 |---|---|---|---|---|---|
 | `spoofing_jump` | 12 | 12 | 100 % | 100 % | 1.0 |
 | `dark_gap` | 12 | 12 | 100 % | 100 % | 1.0 |
-| `sts_encounter` | 12 | 28 | 100 % | 100 % | 1.6 |
+| `sts_encounter` | 12 | 28 | 100 % | 100 % | 1.3 |
 | `cable_loitering` | 12 | 12 | 100 % | 100 % | 2.5 |
 | `sanctioned_vessel` | 2 | 12 | 100 % | 100 % | 1.0 |
 | `identity_change` | 12 | 12 | 100 % | 100 % | 1.0 |
@@ -211,6 +213,8 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements-dev.txt
 pytest -q && ruff check .
 ```
+
+The code was written with [Claude Code](https://claude.com/claude-code) as an assistant (which is why it appears as co-author on the commits). The design, the architecture decisions and the validation on real data (chaos test, evaluation, and reviewing real alerts, which led to rule fixes) are mine.
 
 ## Known limitations
 
