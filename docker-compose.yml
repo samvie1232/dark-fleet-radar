@@ -105,6 +105,9 @@ services:
       s3-init: { condition: service_completed_successfully }
     environment:
       CATALOG_URI: jdbc:sqlite:file:/catalog/iceberg.db
+      # Una sola conexión a SQLite: los dos jobs de Flink hacen commit a la vez en cada checkpoint
+      # y con varias conexiones SQLite responde "database is locked".
+      CATALOG_CLIENTS: "1"
       CATALOG_JDBC_USER: user
       CATALOG_JDBC_PASSWORD: password
       CATALOG_WAREHOUSE: s3://warehouse/
