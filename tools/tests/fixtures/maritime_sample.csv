@@ -1,0 +1,5 @@
+type,caption,imo,risk,countries,flag,mmsi,id,url,datasets,aliases
+VESSEL,SHADOW ONE,9074729,sanction,ru,cm,219000001,os-vessel-1,https://www.opensanctions.org/entities/os-vessel-1/,us_ofac_sdn;eu_fsf,SHADOW 1
+VESSEL,NO IMO TANKER,,sanction,ir,pa,636012345,os-vessel-2,https://www.opensanctions.org/entities/os-vessel-2/,gb_hmt_sanctions,
+VESSEL,TWO IMOS,IMO9074729;IMO1234567,sanction.linked,ru,,,os-vessel-3,https://www.opensanctions.org/entities/os-vessel-3/,ua_war_sanctions,
+VESSEL,NOTHING USEFUL,,poi,,,,os-vessel-4,https://www.opensanctions.org/entities/os-vessel-4/,x,

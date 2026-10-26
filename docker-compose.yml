@@ -133,8 +133,8 @@ services:
         jobmanager.rpc.address: flink-jobmanager
         rest.address: flink-jobmanager
         jobmanager.memory.process.size: 1024m
-        taskmanager.memory.process.size: 2048m
-        taskmanager.numberOfTaskSlots: 2
+        taskmanager.memory.process.size: 2560m
+        taskmanager.numberOfTaskSlots: 4
         parallelism.default: 2
         execution.checkpointing.interval: 60s
         execution.checkpointing.mode: EXACTLY_ONCE
@@ -169,7 +169,34 @@ services:
       flink-jobmanager: { condition: service_healthy }
     restart: unless-stopped
 
-  # Envía el job SQL (o lo retoma desde el último checkpoint). No duplica si ya corre.
+  # ---------- Paso 3: tablas de referencia y detecciones ----------
+
+  # Tablas de referencia (sanciones; luego puertos y cables). Flink las consulta con lookup join.
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: radar
+      POSTGRES_USER: radar
+      POSTGRES_PASSWORD: radar
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U radar -d radar"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # Descarga la lista de barcos sancionados de OpenSanctions (sin red, deja la tabla como estaba).
+  # Para refrescarla: docker compose run --rm ref-loader
+  ref-loader:
+    build: ./tools
+    command: ["load-sanctions"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    restart: "no"
+
+  # Envía los jobs SQL (o los retoma desde su último checkpoint). No duplica si ya corren.
   flink-job:
     build: ./flink
     entrypoint: ["/docker-entrypoint.sh", "/opt/submit.sh"]   # aplica FLINK_PROPERTIES
@@ -180,6 +207,7 @@ services:
     depends_on:
       flink-jobmanager: { condition: service_healthy }
       flink-taskmanager: { condition: service_started }
+      ref-loader: { condition: service_completed_successfully }
     restart: "no"
 
   # Consultas y verificación del lago: docker compose run --rm tools [summary|verify]
@@ -194,3 +222,4 @@ volumes:
   s3-data:
   iceberg-catalog:
   flink-data:
+  postgres-data:

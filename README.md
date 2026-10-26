@@ -5,8 +5,9 @@ comportamientos sospechosos (apagones de señal, spoofing, transferencias en alt
 identidad, barcos sancionados) y los muestra en un mapa, con métricas que prueban que las alertas
 funcionan.
 
-> Estado: **paso 2 de 4**. aisstream.io → productor Python → Redpanda → Flink → Iceberg.
-> Siguen cobertura H3 y detecciones, y validación con precision/recall.
+> Estado: **paso 3 de 4, primera mitad**. Ingesta exactly-once a Iceberg, mapa de cobertura H3 y
+> tres detecciones (spoofing, barcos sancionados, cambios de identidad). Siguen apagones de señal,
+> transferencias entre barcos y merodeo cerca de cables, y luego la validación con precision/recall.
 
 ## Arquitectura
 
@@ -26,7 +27,12 @@ aisstream.io (WebSocket, Báltico + Mar del Norte)
   Iceberg (catálogo REST) sobre S3 local (SeaweedFS)
      ├─ ais.ais_raw                 bronze: cada registro de Kafka una vez, con partición y offset
      ├─ ais.positions               silver: lat/lon/SOG/COG tipados, banderas de calidad, sin duplicados
-     └─ ais.vessel_static_reports   silver: IMO, nombre, indicativo, tipo, destino, calado
+     ├─ ais.vessel_static_reports   silver: IMO, nombre, indicativo, tipo, destino, calado
+     │
+     │  Segundo job de Flink (flink/sql/detections.sql), mismo topic, otro consumer group
+     │        └─ consulta OpenSanctions en Postgres (lookup join con caché de 1 h)
+     ├─ gold.coverage_h3            mensajes y barcos por celda H3 (resolución 7) y hora
+     └─ gold.alerts                 una fila por alerta, con puntaje y evidencia en JSON
 ```
 
 aisstream no tiene SLA ni replay, por eso todo se persiste en Kafka y en disco antes de procesarlo.
@@ -85,6 +91,34 @@ Si apagas el PC, al volver corre `docker compose up -d`: el servicio `flink-job`
 
 **Decisión de diseño, S3 local:** el brief original usaba MinIO, pero MinIO dejó de publicar
 imágenes en Docker Hub. Iceberg solo necesita una API S3, así que se usa SeaweedFS (Apache 2.0).
+
+## Detecciones
+
+Corren en un job de Flink aparte del de ingesta: se pueden cambiar las reglas y reenviar ese job
+sin tocar bronze/silver. Cada alerta tiene un `alert_id` determinista (hash de tipo, barco y hora),
+así que si una alerta se escribiera dos veces se reconoce como la misma.
+
+| Alerta | Regla | Puntaje |
+|---|---|---|
+| `spoofing_jump` | Entre dos posiciones seguidas del mismo MMSI haría falta ir a más de 50 nudos, con un salto de más de 2 km (ningún mercante pasa de unos 30 nudos; los 2 km evitan confundir ruido de GPS con un salto) | velocidad / 100, máximo 1 |
+| `sanctioned_vessel` | El IMO (con dígito de control válido) o el MMSI de un reporte estático aparece en la lista marítima de [OpenSanctions](https://www.opensanctions.org/datasets/maritime/). Una alerta por barco y entrada de la lista | 1,0 si está sancionado, 0,7 si es otro riesgo |
+| `identity_change` | Mismo IMO con otro nombre u otro MMSI en menos de 30 días | 0,9 si cambia la bandera (MID), 0,7 si cambia el MMSI, 0,5 si solo el nombre |
+
+La lista de OpenSanctions se descarga y se carga en Postgres al arrancar (servicio `ref-loader`).
+Para refrescarla: `docker compose --profile tools run --rm tools load-sanctions`.
+
+Funciones propias en Java (`flink/udf/`, se compilan y se prueban al construir la imagen):
+`h3_cell` (celda H3), `haversine_km`, `implied_speed_kn`, `imo_valid` y `epoch_ms`.
+
+Ver las alertas (conteo por tipo y las 20 más recientes):
+
+```bash
+docker compose --profile tools run --rm tools alerts
+```
+
+**Nota técnica:** en Flink 1.20 el sql-client falla ("belongs to a different planner") si se usan
+vistas temporales dentro de un `STATEMENT SET`, así que los campos del JSON se sacan como columnas
+calculadas de la tabla fuente y cada consulta va completa en su `INSERT`.
 
 ## Qué hace el productor
 
