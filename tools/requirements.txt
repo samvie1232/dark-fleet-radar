@@ -1,0 +1,4 @@
+boto3==1.38.8
+duckdb==1.2.2
+pyarrow==19.0.1
+pyiceberg==0.9.1

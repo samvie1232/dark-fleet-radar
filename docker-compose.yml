@@ -1,4 +1,5 @@
 # Paso 1: ingesta. Redpanda (Kafka) + consola web + productor aisstream.
+# Paso 2: Flink lee ais.raw y escribe tablas Iceberg (catálogo REST) en un S3 local (SeaweedFS).
 # Arranque: cp .env.example .env  (pon tu API key)  &&  docker compose up -d --build
 name: dark-fleet-radar
 
@@ -19,6 +20,7 @@ services:
       - "18081:18081"   # Schema Registry
     volumes:
       - redpanda-data:/var/lib/redpanda/data
+    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' || exit 1"]
       interval: 5s
@@ -50,6 +52,7 @@ services:
       KAFKA_SCHEMAREGISTRY_URLS: http://redpanda:8081
     ports:
       - "${CONSOLE_PORT:-8090}:8080"   # http://localhost:8090 (8080 suele estar ocupado por Airflow)
+    restart: unless-stopped
 
   producer:
     build: ./producer
@@ -65,5 +68,129 @@ services:
       - "${METRICS_HOST_PORT:-8000}:8000"   # métricas Prometheus: http://localhost:8000/metrics
     restart: unless-stopped
 
+  # ---------- Paso 2: lago Iceberg ----------
+
+  # S3 local. MinIO ya no publica imágenes en Docker Hub; SeaweedFS es Apache 2.0 y habla S3.
+  s3:
+    image: chrislusf/seaweedfs:4.00
+    command: >
+      server -dir=/data -ip.bind=0.0.0.0
+      -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json
+      -master.volumeSizeLimitMB=512 -volume.max=0
+    volumes:
+      - s3-data:/data
+      - ./infra/seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro
+    ports:
+      - "8333:8333"     # API S3 desde tu PC
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8333/healthz || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # Crea el bucket "warehouse" una sola vez.
+  s3-init:
+    build: ./tools
+    command: ["init-storage"]
+    depends_on:
+      s3: { condition: service_healthy }
+    restart: "no"
+
+  # Catálogo Iceberg REST. Guarda los metadatos del catálogo en SQLite dentro de un volumen.
+  iceberg-rest:
+    image: apache/iceberg-rest-fixture:1.8.1
+    user: root
+    depends_on:
+      s3-init: { condition: service_completed_successfully }
+    environment:
+      CATALOG_URI: jdbc:sqlite:file:/catalog/iceberg.db
+      CATALOG_JDBC_USER: user
+      CATALOG_JDBC_PASSWORD: password
+      CATALOG_WAREHOUSE: s3://warehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://s3:8333
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+      AWS_ACCESS_KEY_ID: radar
+      AWS_SECRET_ACCESS_KEY: radar-local-secret
+      AWS_REGION: us-east-1
+    volumes:
+      - iceberg-catalog:/catalog
+    ports:
+      - "8181:8181"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8181/v1/config || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  flink-jobmanager:
+    build: ./flink
+    command: jobmanager
+    environment:
+      FLINK_PROPERTIES: &flink-props |
+        jobmanager.rpc.address: flink-jobmanager
+        rest.address: flink-jobmanager
+        jobmanager.memory.process.size: 1024m
+        taskmanager.memory.process.size: 2048m
+        taskmanager.numberOfTaskSlots: 2
+        parallelism.default: 2
+        execution.checkpointing.interval: 60s
+        execution.checkpointing.mode: EXACTLY_ONCE
+        execution.checkpointing.min-pause: 10s
+        execution.checkpointing.externalized-checkpoint-retention: RETAIN_ON_CANCELLATION
+        state.checkpoints.num-retained: 3
+        state.backend.type: hashmap
+        state.checkpoints.dir: file:///flink-data/checkpoints
+        restart-strategy.type: exponential-delay
+    volumes:
+      - flink-data:/flink-data
+    ports:
+      - "8081:8081"     # Flink UI: http://localhost:8081
+    depends_on:
+      iceberg-rest: { condition: service_healthy }
+      topics: { condition: service_completed_successfully }
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8081/overview || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  flink-taskmanager:
+    build: ./flink
+    command: taskmanager
+    environment:
+      FLINK_PROPERTIES: *flink-props
+    volumes:
+      - flink-data:/flink-data
+    depends_on:
+      flink-jobmanager: { condition: service_healthy }
+    restart: unless-stopped
+
+  # Envía el job SQL (o lo retoma desde el último checkpoint). No duplica si ya corre.
+  flink-job:
+    build: ./flink
+    entrypoint: ["/docker-entrypoint.sh", "/opt/submit.sh"]   # aplica FLINK_PROPERTIES
+    environment:
+      FLINK_PROPERTIES: *flink-props
+    volumes:
+      - flink-data:/flink-data
+    depends_on:
+      flink-jobmanager: { condition: service_healthy }
+      flink-taskmanager: { condition: service_started }
+    restart: "no"
+
+  # Consultas y verificación del lago: docker compose run --rm tools [summary|verify]
+  tools:
+    build: ./tools
+    profiles: ["tools"]
+    depends_on:
+      iceberg-rest: { condition: service_healthy }
+
 volumes:
   redpanda-data:
+  s3-data:
+  iceberg-catalog:
+  flink-data:
