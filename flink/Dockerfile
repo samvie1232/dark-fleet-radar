@@ -14,4 +14,5 @@ RUN cd /opt/flink/lib && \
 
 COPY sql/ /opt/sql/
 COPY submit.sh /opt/submit.sh
-RUN chmod +x /opt/submit.sh && mkdir -p /flink-data && chown flink:flink /flink-data
+# Quita \r por si el repo se clonó en Windows con saltos de línea CRLF.
+RUN sed -i 's/\r$//' /opt/submit.sh /opt/sql/*.sql && chmod +x /opt/submit.sh && mkdir -p /flink-data && chown flink:flink /flink-data

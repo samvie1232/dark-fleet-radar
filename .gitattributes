@@ -1,0 +1,6 @@
+# Los scripts que corren dentro de contenedores Linux deben quedar con LF aunque se clonen en Windows.
+*.sh   text eol=lf
+*.sql  text eol=lf
+*.yml  text eol=lf
+*.json text eol=lf
+Dockerfile text eol=lf

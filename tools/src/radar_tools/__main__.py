@@ -31,7 +31,12 @@ def verify() -> int:
     from .exactly_once import check, format_report
 
     catalog = settings.load_catalog()
-    table = catalog.load_table(f"{settings.NAMESPACE}.ais_raw")
+    ident = f"{settings.NAMESPACE}.ais_raw"
+    if not catalog.table_exists(ident):
+        print(f"La tabla {ident} todavía no existe: el job de Flink no ha arrancado.")
+        print("Revisa: docker compose logs flink-job --tail 40")
+        return 1
+    table = catalog.load_table(ident)
     offsets = table.scan(selected_fields=("kafka_partition", "kafka_offset")).to_arrow()
     text, ok = format_report(check(offsets))
     print(text)
