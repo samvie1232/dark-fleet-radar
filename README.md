@@ -5,8 +5,16 @@ comportamientos sospechosos (apagones de señal, spoofing, transferencias en alt
 identidad, barcos sancionados) y los muestra en un mapa, con métricas que prueban que las alertas
 funcionan.
 
-> Estado: **paso 3 de 4**. Ingesta exactly-once a Iceberg, mapa de cobertura H3 y seis
-> detecciones en streaming. Sigue el paso 4: mapa, Grafana y validación con precision/recall.
+## En números
+
+| Qué | Resultado |
+|---|---|
+| Exactly-once | 0 duplicados y 0 huecos por offset de Kafka en bronze, también después de matar Flink a mitad de camino ([prueba de caos](#exactly-once-y-prueba-de-caos)) |
+| Detecciones | 6 reglas en streaming: spoofing, apagones, encuentros en alta mar, merodeo sobre cables, barcos sancionados y cambios de identidad |
+| Precision / recall | 100 % / 100 % en las 6 reglas sobre 150 barcos etiquetados (positivos y negativos difíciles) ([evaluación](#evaluación-precision-y-recall)) |
+| Datos reales | Báltico y Mar del Norte en vivo: unos 3.000 mensajes AIS por minuto en un PC de 16 GB |
+
+![Prueba de caos: se mata el TaskManager, Flink retoma desde el checkpoint y la tabla bronze queda sin duplicados ni huecos](docs/chaos_test.gif)
 
 ## Arquitectura
 
@@ -32,6 +40,9 @@ aisstream.io (WebSocket, Báltico + Mar del Norte)
      │        └─ consulta en Postgres OpenSanctions, puertos, cables y cobertura (lookup joins)
      ├─ gold.coverage_h3            mensajes y barcos por celda H3 (resolución 7) y hora
      └─ gold.alerts                 una fila por alerta, con puntaje y evidencia en JSON
+                │
+                ▼
+  Postgres (alertas y cobertura) + Prometheus (métricas) ──► Grafana: mapa y salud del pipeline
 ```
 
 aisstream no tiene SLA ni replay, por eso todo se persiste en Kafka y en disco antes de procesarlo.
@@ -80,11 +91,8 @@ revisa que en cada partición no haya offsets repetidos (duplicados) ni saltos (
 
 Prueba de caos: `./scripts/chaos_test.sh` (o `.\scripts\chaos_test.ps1` en Windows) mata el
 TaskManager a mitad de camino, muestra cómo los dos jobs pasan a `RESTARTING` y vuelven a `RUNNING`
-desde el último checkpoint, espera dos checkpoints nuevos y vuelve a verificar:
-
-![Prueba de caos: se mata el TaskManager, Flink retoma desde el checkpoint y la tabla bronze queda sin duplicados ni huecos](docs/chaos_test.gif)
-
-(Grabada en el entorno de desarrollo con un feed AIS simulado; las esperas largas van aceleradas.)
+desde el último checkpoint, espera dos checkpoints nuevos y vuelve a verificar. Es el GIF del
+inicio (grabado en el entorno de desarrollo con un feed AIS simulado; las esperas largas van aceleradas).
 Entre las dos verificaciones entraron 14.099 filas más y siguen en 0 duplicados y 0 huecos en las
 6 particiones.
 
@@ -230,6 +238,17 @@ python -m venv .venv && source .venv/bin/activate
 pip install -r requirements-dev.txt
 pytest -q && ruff check .
 ```
+
+## Limitaciones conocidas
+
+- **Cobertura AIS:** aisstream junta receptores en tierra. Lejos de la costa hay huecos, y un
+  apagón ahí no se puede distinguir de falta de cobertura (por eso la regla lo exige).
+- **Zonas aproximadas:** los trazados de cables y las zonas de puerto son de pocos puntos. Un
+  trasvase dentro de un fondeadero concurrido tampoco alerta, por el filtro de densidad.
+- **Evaluación sintética:** el 100 % mide que cada regla hace lo que dice sobre casos construidos,
+  no su precisión en el mundo real, donde no hay etiquetas.
+- **Un solo nodo:** todo corre en Docker en un PC. Flink, Redpanda y el catálogo (SQLite) tienen
+  paralelismo 1 y no hay alta disponibilidad.
 
 ## Ética y licencias
 
