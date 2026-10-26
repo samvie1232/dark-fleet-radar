@@ -1,0 +1,69 @@
+# Paso 1: ingesta. Redpanda (Kafka) + consola web + productor aisstream.
+# Arranque: cp .env.example .env  (pon tu API key)  &&  docker compose up -d --build
+name: dark-fleet-radar
+
+services:
+  redpanda:
+    image: redpandadata/redpanda:v24.2.18
+    command:
+      - redpanda
+      - start
+      - --mode=dev-container
+      - --smp=1
+      - --memory=1G
+      - --kafka-addr=internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr=internal://redpanda:9092,external://localhost:19092
+      - --schema-registry-addr=internal://0.0.0.0:8081,external://0.0.0.0:18081
+    ports:
+      - "19092:19092"   # Kafka desde tu PC
+      - "18081:18081"   # Schema Registry
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Crea los topics una sola vez. ais.raw: 6 particiones por MMSI, retención 7 días.
+  topics:
+    image: redpandadata/redpanda:v24.2.18
+    depends_on:
+      redpanda: { condition: service_healthy }
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        export RPK_BROKERS=redpanda:9092
+        rpk topic create ais.raw -p 6 -c retention.ms=604800000 -c cleanup.policy=delete || true
+        rpk topic create ais.dlq -p 1 -c retention.ms=604800000 || true
+        rpk topic list
+    restart: "no"
+
+  console:
+    image: redpandadata/console:v2.8.5
+    depends_on:
+      redpanda: { condition: service_healthy }
+    environment:
+      KAFKA_BROKERS: redpanda:9092
+      KAFKA_SCHEMAREGISTRY_ENABLED: "true"
+      KAFKA_SCHEMAREGISTRY_URLS: http://redpanda:8081
+    ports:
+      - "8080:8080"     # http://localhost:8080
+
+  producer:
+    build: ./producer
+    depends_on:
+      topics: { condition: service_completed_successfully }
+    env_file: .env
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
+      AIS_RECORD_DIR: /data/raw
+    volumes:
+      - ./data:/data
+    ports:
+      - "8000:8000"     # métricas Prometheus: http://localhost:8000/metrics
+    restart: unless-stopped
+
+volumes:
+  redpanda-data:
