@@ -16,6 +16,8 @@ curl -sf "$JM/jobs/overview" | tr '{' '\n' | grep "\"name\":\"$NAME\"" \
     curl -sf -X PATCH "$JM/jobs/$jid?mode=cancel" >/dev/null || true
   done || true
 
+# Las cachés de lookup caducan por reloj, no por tiempo de evento: a 120x, 1 h de reloj son 120 h
+# simuladas, y un barco cuyo tipo aún no se conocía quedaría sin tipo toda la evaluación.
 job=/tmp/eval.sql
 {
   echo "SET 'execution.checkpointing.interval' = '10 s';"
@@ -29,6 +31,8 @@ job=/tmp/eval.sql
       -e "s|'table-name' = 'coverage_hourly'|'table-name' = 'coverage_hourly_eval'|" \
       -e "s|'table-name' = 'coverage_zone_hourly'|'table-name' = 'coverage_zone_hourly_eval'|" \
       -e "s|'table-name' = 'alerts'|'table-name' = 'alerts_eval'|" \
+      -e "s|'table-name' = 'vessel_types'|'table-name' = 'vessel_types_eval'|" \
+      -e "s|'lookup.partial-cache.expire-after-write' = '1 h'|'lookup.partial-cache.expire-after-write' = '10 s'|" \
       /opt/sql/detections.sql
 } > "$job"
 

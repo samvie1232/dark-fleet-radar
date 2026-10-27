@@ -14,7 +14,7 @@ funcionan.
 | Exactly-once | 0 duplicados y 0 huecos por offset de Kafka en bronze, también después de matar Flink a mitad de camino ([prueba de caos](#exactly-once-y-prueba-de-caos)) |
 | Detecciones | 6 reglas en streaming: spoofing, apagones, encuentros en alta mar, merodeo sobre cables, barcos sancionados y cambios de identidad |
 | Precision / recall | 100 % / 100 % en las 6 reglas sobre 150 barcos etiquetados (positivos y negativos difíciles) ([evaluación](#evaluación-precision-y-recall)) |
-| Datos reales | Báltico y Mar del Norte en vivo: unos 3.000 mensajes AIS por minuto en un PC de 16 GB |
+| Datos reales | Báltico y Mar del Norte en vivo: unos 3.000 mensajes AIS por minuto en un PC de 16 GB. En 29 horas seguidas: 6.055.107 mensajes, 0 duplicados, 0 huecos, unos 3.000 checkpoints y ninguno fallido ([lo que enseñaron](#lo-que-enseñaron-24-horas-de-datos-reales)) |
 
 ![Tablero de Grafana con datos reales del Báltico y el Mar del Norte: alertas en el mapa, cobertura H3, alertas por tipo y salud del pipeline](docs/grafana.png)
 
@@ -127,16 +127,16 @@ así que si una alerta se escribiera dos veces se reconoce como la misma.
 | `spoofing_jump` | Entre dos posiciones seguidas del mismo MMSI haría falta ir a más de 50 nudos, con un salto de más de 2 km (ningún mercante pasa de unos 30 nudos; los 2 km evitan confundir ruido de GPS con un salto). Una alerta por episodio: solo el primer salto tras 6 h sin saltos de ese barco | velocidad / 100, máximo 1 |
 | `sanctioned_vessel` | El IMO (con dígito de control válido) o el MMSI de un reporte estático aparece en la lista marítima de [OpenSanctions](https://www.opensanctions.org/datasets/maritime/). Una alerta por barco, con todas las listas que lo nombran | 1,0 si está sancionado, 0,7 si es otro riesgo |
 | `identity_change` | Mismo IMO con un nombre o MMSI nunca visto antes para ese IMO, en menos de 30 días (el nombre se compara sin importar el orden de las palabras, mayúsculas ni signos: "VLI-25 CINDY" = "CINDY VLI-25"; y alternar entre dos formas ya vistas no vuelve a alertar) | 0,9 si cambia la bandera (MID), 0,7 si cambia el MMSI, 0,5 si solo el nombre |
-| `dark_gap` | Un barco calla 2 horas o más fuera de puerto **y** en la hora central del silencio se oía a otros 2 barcos o más en su misma zona (celda H3 de resolución 5, unos 250 km²; una celda chica casi nunca tiene a otro barco en la misma hora en mar abierto). Si no se oía a nadie, el silencio puede ser de cobertura (o del propio receptor apagado) y no alerta | horas de silencio / 12, máximo 1 |
-| `sts_encounter` | Dos barcos a menos de 2 nudos (sin estar amarrados), fuera de puerto, a menos de 1 km entre sí durante al menos 90 minutos de una ventana de 2 h: posible transferencia barco a barco. Los pares se buscan entre celdas H3 vecinas, así que dos barcos a la deriva no se pierden por caer a ambos lados de un borde. No cuenta si en la celda (~36 km²) hay más de 4 barcos quietos: eso es un fondeadero o una zona de espera. Alerta en cada ventana mientras dure | 0,5 + minutos juntos / 240, máximo 1 |
-| `cable_loitering` | Un barco lento (< 3 nudos) o fondeado pasa 30 minutos o más de una hora (ventanas de 1 h que avanzan cada 30 min) dentro de la franja (~3 km) de un cable o ducto submarino, fuera de puerto. Es el patrón previo a los daños del Balticconnector (2023) y del Eagle S (2024) | 0,4 + minutos / 100, máximo 1 |
+| `dark_gap` | Un barco calla 2 horas o más fuera de puerto **y** en la hora central del silencio se oía a otros 2 barcos o más en su misma zona (celda H3 de resolución 5, unos 250 km²; una celda chica casi nunca tiene a otro barco en la misma hora en mar abierto). Si no se oía a nadie, el silencio puede ser de cobertura (o del propio receptor apagado) y no alerta. Tiene que reaparecer a 2 km o más de donde se apagó: un barco atracado que apaga el AIS y vuelve en el mismo sitio no es sospechoso | horas de silencio / 12, máximo 1 |
+| `sts_encounter` | Dos barcos a menos de 2 nudos (sin estar amarrados), fuera de puerto, a menos de 1 km entre sí durante al menos 90 minutos de una ventana de 2 h: posible transferencia barco a barco. Los pares se buscan entre celdas H3 vecinas, así que dos barcos a la deriva no se pierden por caer a ambos lados de un borde. No cuenta si en la celda (~36 km²) hay más de 4 barcos quietos: eso es un fondeadero o una zona de espera. Al menos uno de los dos tiene que ser petrolero (tipo AIS 80-89). Una alerta por episodio: no vuelve a alertar por el mismo par hasta 6 h después del último encuentro | 0,5 + minutos juntos / 240, máximo 1 |
+| `cable_loitering` | Un barco lento (< 3 nudos) o fondeado pasa 30 minutos o más de una hora (ventanas de 1 h que avanzan cada 30 min) dentro de la franja (~3 km) de un cable o ducto submarino, fuera de puerto. Es el patrón previo a los daños del Balticconnector (2023) y del Eagle S (2024). Una alerta por episodio (6 h) | 0,4 + minutos / 100, máximo 1 |
 
 Zonas de referencia (`tools/src/radar_tools/geo.py`, como celdas H3 en Postgres): 49 puertos del Mar
 del Norte y el Báltico (unos 10 km alrededor) y 9 cables y ductos (Balticconnector, Estlink 1 y 2,
 C-Lion1, Nord Stream, BCS, NordBalt, NorNed, North Sea Link). **Los trazados son aproximados**, unos
 pocos puntos por cable; para algo serio habría que cargar el trazado real (por ejemplo de EMODnet).
 
-Cuando se cambian las reglas, el job de detecciones sube de versión (hoy `dark-fleet-radar-detections-v5`):
+Cuando se cambian las reglas, el job de detecciones sube de versión (hoy `dark-fleet-radar-detections-v6`):
 `flink-job` cancela la versión anterior y la nueva sigue desde los offsets que esa dejó en Kafka.
 
 La lista de OpenSanctions se descarga y se carga en Postgres al arrancar (servicio `ref-loader`).
@@ -176,8 +176,8 @@ deben alertar:
 | Alerta | Positivos | Negativos difíciles |
 |---|---|---|
 | `spoofing_jump` | Un reporte desplazado 90 a 330 km durante un minuto | Ferry a 35 nudos, ruido de GPS de ~1 km, 30 min sin reportar |
-| `dark_gap` | Silencio de 2,5 a 6 h con otros barcos oyéndose cerca | Silencio de 1,5 h, silencio donde no se oye a nadie, silencio en puerto |
-| `sts_encounter` | Dos barcos a 0,1-0,8 km, a menos de 1,5 nudos, 3 a 5 h | A 2,5 km, en puerto, solo 60 min, convoy a 9 nudos, fondeadero con 9 barcos |
+| `dark_gap` | Silencio de 2,5 a 6 h con otros barcos oyéndose cerca | Silencio de 1,5 h, silencio donde no se oye a nadie, silencio en puerto, reaparece en el mismo sitio |
+| `sts_encounter` | Dos barcos a 0,1-0,8 km, a menos de 1,5 nudos, 3 a 5 h | A 2,5 km, en puerto, solo 60 min, convoy a 9 nudos, fondeadero con 9 barcos, dos cargueros (ningún petrolero) |
 | `cable_loitering` | Barco lento sobre un cable 45 a 120 min | Cruza a 10 nudos, solo 20 min, lento pero lejos del cable |
 | `sanctioned_vessel` | IMO de la lista cargada (hay 2 en la lista de ejemplo) | IMO válido que no está en la lista |
 | `identity_change` | Mismo IMO con otro MMSI y bandera | Misma identidad todo el tiempo, mismo nombre con otras mayúsculas y espacios, mismo nombre con las palabras en otro orden |
@@ -188,8 +188,8 @@ Resultado (`reports/evaluation.md`):
 |---|---|---|---|---|---|
 | `spoofing_jump` | 12 | 12 | 100 % | 100 % | 1.0 |
 | `dark_gap` | 12 | 12 | 100 % | 100 % | 1.0 |
-| `sts_encounter` | 12 | 28 | 100 % | 100 % | 1.3 |
-| `cable_loitering` | 12 | 12 | 100 % | 100 % | 2.5 |
+| `sts_encounter` | 12 | 28 | 100 % | 100 % | 1.0 |
+| `cable_loitering` | 12 | 12 | 100 % | 100 % | 1.0 |
 | `sanctioned_vessel` | 2 | 12 | 100 % | 100 % | 1.0 |
 | `identity_change` | 12 | 12 | 100 % | 100 % | 1.0 |
 
@@ -210,8 +210,6 @@ Esto es lo que se corrigió:
 - **Generador:** un negativo salía como falsa alarma porque dos casos compartían el mismo IMO por
   azar. Ahora los IMO del generador son únicos.
 
-"Alertas por caso" mayor que 1 es esperable en encuentros y cables: alertan una vez por ventana
-mientras dure el patrón (encuentros cada 2 h; cables en ventanas de 1 h que se solapan cada 30 min).
 Un 100 % aquí quiere decir que cada regla hace lo que dice sobre estos casos, no que acierte siempre
 con datos reales.
 
@@ -221,6 +219,24 @@ Para correrla (con el stack levantado; tarda unos 15 minutos y no toca los datos
 ./scripts/evaluate.sh        # Linux/macOS
 .\scripts\evaluate.ps1     # Windows (PowerShell)
 ```
+
+## Lo que enseñaron 24 horas de datos reales
+
+La infraestructura aguantó sin tocarla: 29 horas seguidas, 6.055.107 mensajes en bronze con 0
+duplicados y 0 huecos, 3,6 millones de posiciones, unos 3.000 checkpoints y ninguno fallido.
+
+Las reglas, en cambio, pasaban la evaluación sintética y aun así hacían ruido con datos reales.
+Esto es lo que mostró el primer día completo y lo que se cambió (job `-v6`):
+
+| Regla | Con datos reales (24 h) | Por qué | Cambio |
+|---|---|---|---|
+| `dark_gap` | 3.727 barcos | La mayoría reaparecía a 0,0 km de donde se apagó: barcos atracados o fondeados que apagan el AIS | Tiene que reaparecer a 2 km o más |
+| `cable_loitering` | 3.602 alertas para 147 barcos | Cada ventana de 30 min volvía a alertar mientras el barco seguía ahí | Una alerta por episodio (6 h) |
+| `sts_encounter` | 1.312 barcos | Contaba cualquier par de barcos parados juntos, aunque ninguno fuera petrolero; además, alertaba cada 2 h por par | Al menos un petrolero en el par, y una alerta por episodio |
+| `identity_change` | 10 barcos | Antes, un barco alternaba "VLI-25 CINDY" y "CINDY VLI-25" | El nombre se compara sin orden de palabras (`-v5`) |
+
+Cada cambio tiene su negativo difícil en la evaluación ("reaparece en el mismo sitio", "dos
+cargueros"), así que una regresión se ve en la siguiente corrida.
 
 ## Qué hace el productor
 
