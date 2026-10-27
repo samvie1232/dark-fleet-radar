@@ -16,7 +16,7 @@ funcionan.
 | Precision / recall | 100 % / 100 % en las 6 reglas sobre 150 barcos etiquetados (positivos y negativos difíciles) ([evaluación](#evaluación-precision-y-recall)) |
 | Datos reales | Báltico y Mar del Norte en vivo: unos 3.000 mensajes AIS por minuto en un PC de 16 GB. En 29 horas seguidas: 6.055.107 mensajes, 0 duplicados, 0 huecos, unos 3.000 checkpoints y ninguno fallido ([lo que enseñaron](#lo-que-enseñaron-24-horas-de-datos-reales)) |
 
-![Tablero de Grafana con datos reales del Báltico y el Mar del Norte: alertas en el mapa, cobertura H3, alertas por tipo y salud del pipeline](docs/grafana.png)
+![Tablero de Grafana con 24 horas de datos reales del Báltico y el Mar del Norte: alertas en el mapa, cobertura H3, alertas por tipo y salud del pipeline](docs/grafana.png)
 
 ![Prueba de caos: se mata el TaskManager, Flink retoma desde el checkpoint y la tabla bronze queda sin duplicados ni huecos](docs/chaos_test.gif)
 

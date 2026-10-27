@@ -15,7 +15,7 @@ shows it on a map, with metrics that prove the alerts work.
 | Precision / recall | 100 % / 100 % on all 6 rules over 150 labelled vessels (positives and hard negatives) ([evaluation](#evaluation-precision-and-recall)) |
 | Real data | Live Baltic and North Sea traffic: about 3,000 AIS messages per minute on a 16 GB PC. Over 29 hours straight: 6,055,107 messages, 0 duplicates, 0 gaps, about 3,000 checkpoints and none failed ([lessons](#what-24-hours-of-real-data-taught)) |
 
-![Grafana dashboard on real Baltic and North Sea data: alert map, H3 coverage, alerts by type and pipeline health](docs/grafana.png)
+![Grafana dashboard with 24 hours of real Baltic and North Sea data: alert map, H3 coverage, alerts by type and pipeline health](docs/grafana.png)
 
 ![Chaos test: the TaskManager is killed, Flink resumes from its checkpoint and the bronze table ends with no duplicates or gaps](docs/chaos_test.gif)
 
