@@ -61,6 +61,7 @@ class Static:
     mmsi: int
     imo: int
     name: str
+    ship_type: int = 80  # código AIS: 80-89 petroleros, 70-79 carga
 
 
 @dataclass
@@ -211,10 +212,19 @@ class Builder:
             )
             m, north = leg_end + 1, not north
 
-    def statics(self, mmsi: int, imo: int, name: str, t0: float, t1: float, every: float = 10):
+    def statics(
+        self,
+        mmsi: int,
+        imo: int,
+        name: str,
+        t0: float,
+        t1: float,
+        every: float = 10,
+        ship_type: int = 80,
+    ):
         m = t0
         while m <= t1:
-            self.plan.statics.append(Static(m, mmsi, imo, name))
+            self.plan.statics.append(Static(m, mmsi, imo, name, ship_type))
             m += every
 
     def vessel(self, t0: float, t1: float, **track_kw) -> int:
@@ -262,13 +272,20 @@ def build_plan(seed: int = 42, n: int = 12, listed_imos: list[int] | None = None
         b.label(f"spoof-neg-{kind}-{i}", "spoofing_jump", mmsi, False)
 
     # 2. Apagón de señal
-    def gap_case(name: str, gap_h: float, background: bool, where: tuple[float, float], pos: bool):
+    def gap_case(
+        name: str,
+        gap_h: float,
+        background: bool,
+        where: tuple[float, float],
+        pos: bool,
+        moved_km: float = 20,
+    ):
         t0 = start(gap_h * 60 + 120)
         g0, g1 = t0 + 60, t0 + 60 + gap_h * 60
         mmsi = b.mmsi()
-        # Casi quieto (0,2 nudos) en el sitio antes del apagón; reaparece 20 km más allá.
+        # Casi quieto (0,2 nudos) en el sitio antes del apagón; reaparece `moved_km` más allá.
         b.track(mmsi, start=where, t0=t0, t1=g0 - 1, sog=0.2, heading_deg=90)
-        after = offset(*where, 0, 20)
+        after = offset(*where, 0, moved_km)
         b.track(mmsi, start=after, t0=g1, t1=g1 + 60, sog=10, heading_deg=90)
         b.statics(mmsi, b.imo(), f"EVAL {mmsi}", t0, g1 + 60)
         if background:  # tres pesqueros yendo y viniendo a pocos km, todo el rato: hay cobertura
@@ -281,16 +298,27 @@ def build_plan(seed: int = 42, n: int = 12, listed_imos: list[int] | None = None
     for i in range(n):
         gap_case(f"gap-pos-{i}", rng.uniform(2.5, 6), True, b.site(), True)
     for i in range(n):
-        kind = neg_kind(i, ("short_gap", "no_coverage", "in_port"))
+        kind = neg_kind(i, ("short_gap", "no_coverage", "in_port", "same_spot"))
         if kind == "short_gap":
             gap_case(f"gap-neg-{kind}-{i}", 1.5, True, b.site(), False)
         elif kind == "no_coverage":
             gap_case(f"gap-neg-{kind}-{i}", 4, False, b.site(), False)
-        else:
+        elif kind == "in_port":
             gap_case(f"gap-neg-{kind}-{i}", 4, True, b.port_site(), False)
+        else:  # atracado o fondeado: apaga el AIS y vuelve a aparecer en el mismo sitio
+            gap_case(f"gap-neg-{kind}-{i}", 4, True, b.site(), False, moved_km=0.3)
 
     # 3. Encuentro en alta mar
-    def pair(name: str, where, dist_km: float, minutes: float, sog: float, nav: int, pos: bool):
+    def pair(
+        name: str,
+        where,
+        dist_km: float,
+        minutes: float,
+        sog: float,
+        nav: int,
+        pos: bool,
+        ship_type: int = 80,
+    ):
         t0 = start(minutes)
         a, c = b.mmsi(), b.mmsi()
         b.track(a, start=where, t0=t0, t1=t0 + minutes, sog=sog, heading_deg=0, nav=nav)
@@ -304,7 +332,7 @@ def build_plan(seed: int = 42, n: int = 12, listed_imos: list[int] | None = None
             nav=nav,
         )
         for m in (a, c):
-            b.statics(m, b.imo(), f"EVAL {m}", t0, t0 + minutes)
+            b.statics(m, b.imo(), f"EVAL {m}", t0, t0 + minutes, ship_type=ship_type)
         b.label(name, "sts_encounter", min(a, c), pos)
 
     for i in range(n):
@@ -318,7 +346,9 @@ def build_plan(seed: int = 42, n: int = 12, listed_imos: list[int] | None = None
             True,
         )
     for i in range(n):
-        kind = neg_kind(i, ("far_2_5km", "in_port", "only_60min", "convoy_9kn", "anchorage"))
+        kind = neg_kind(
+            i, ("far_2_5km", "in_port", "only_60min", "convoy_9kn", "anchorage", "no_tanker")
+        )
         if kind == "far_2_5km":
             pair(f"sts-neg-{kind}-{i}", b.site(), 2.5, 240, 0.5, 1, False)
         elif kind == "in_port":
@@ -327,6 +357,10 @@ def build_plan(seed: int = 42, n: int = 12, listed_imos: list[int] | None = None
             pair(f"sts-neg-{kind}-{i}", b.site(), 0.3, 60, 0.5, 1, False)
         elif kind == "convoy_9kn":
             pair(f"sts-neg-{kind}-{i}", b.site(), 0.2, 240, 9, 0, False)
+        elif (
+            kind == "no_tanker"
+        ):  # dos cargueros (tipo 70) juntos: no es el patrón de la flota fantasma
+            pair(f"sts-neg-{kind}-{i}", b.site(), 0.3, 240, 0.5, 1, False, ship_type=70)
         else:  # fondeadero en mar abierto: 9 barcos quietos a 400 m unos de otros
             t0 = start(240)
             center = h3.cell_to_latlng(h3.latlng_to_cell(*b.site(), geo.PORT_RES))
@@ -416,7 +450,12 @@ def envelope(t0: datetime, item: Ping | Static) -> tuple[datetime, bytes, bytes]
         name = "EVAL"
     else:
         mtype, lat, lon = "ShipStaticData", 0.0, 0.0
-        body = {"ImoNumber": item.imo, "Name": item.name, "CallSign": "EVAL", "Type": 80}
+        body = {
+            "ImoNumber": item.imo,
+            "Name": item.name,
+            "CallSign": "EVAL",
+            "Type": item.ship_type,
+        }
         name = item.name
     raw = json.dumps(
         {
@@ -572,7 +611,7 @@ def reset(dsn: str) -> None:
 
     with psycopg.connect(dsn) as conn, conn.cursor() as cur:
         cur.execute(geo.DDL)
-        for t in ("coverage_hourly", "coverage_zone_hourly", "alerts"):
+        for t in ("coverage_hourly", "coverage_zone_hourly", "alerts", "vessel_types"):
             cur.execute(f"DROP TABLE IF EXISTS {t}_eval")
             cur.execute(f"CREATE TABLE {t}_eval (LIKE {t} INCLUDING ALL)")
 

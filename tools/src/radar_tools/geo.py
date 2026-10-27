@@ -188,6 +188,8 @@ CREATE TABLE IF NOT EXISTS alerts (
     detected_at TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS alerts_end_time ON alerts (end_time);
+-- Tipo de buque (código AIS) por MMSI; la escribe Flink y la consultan los encuentros en alta mar.
+CREATE TABLE IF NOT EXISTS vessel_types (mmsi BIGINT PRIMARY KEY, ship_type INTEGER NOT NULL);
 """
 
 
