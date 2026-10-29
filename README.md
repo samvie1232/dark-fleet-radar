@@ -14,9 +14,9 @@ funcionan.
 | Exactly-once | 0 duplicados y 0 huecos por offset de Kafka en bronze, también después de matar Flink a mitad de camino ([prueba de caos](#exactly-once-y-prueba-de-caos)) |
 | Detecciones | 6 reglas en streaming: spoofing, apagones, encuentros en alta mar, merodeo sobre cables, barcos sancionados y cambios de identidad |
 | Precision / recall | 100 % / 100 % en las 6 reglas sobre 150 barcos etiquetados (positivos y negativos difíciles) ([evaluación](#evaluación-precision-y-recall)) |
-| Datos reales | Báltico y Mar del Norte en vivo: unos 3.000 mensajes AIS por minuto en un PC de 16 GB. En 29 horas seguidas: 6.055.107 mensajes, 0 duplicados, 0 huecos, unos 3.000 checkpoints y ninguno fallido ([lo que enseñaron](#lo-que-enseñaron-24-horas-de-datos-reales)) |
+| Datos reales | Báltico y Mar del Norte en vivo: unos 3.000 mensajes AIS por minuto en un PC de 16 GB. 11.722.237 mensajes en bronze con 0 duplicados y 0 huecos, unos 3.000 checkpoints al día sin fallos, y 88 % menos alertas tras ajustar las reglas con un día de datos reales ([antes y después](#lo-que-enseñaron-los-datos-reales)) |
 
-![Tablero de Grafana con 24 horas de datos reales del Báltico y el Mar del Norte: alertas en el mapa, cobertura H3, alertas por tipo y salud del pipeline](docs/grafana.png)
+![Tablero de Grafana con 24 horas de datos reales del Báltico y el Mar del Norte (reglas -v6): alertas en el mapa, cobertura H3, alertas por tipo y salud del pipeline](docs/grafana.png)
 
 ![Prueba de caos: se mata el TaskManager, Flink retoma desde el checkpoint y la tabla bronze queda sin duplicados ni huecos](docs/chaos_test.gif)
 
@@ -220,20 +220,24 @@ Para correrla (con el stack levantado; tarda unos 15 minutos y no toca los datos
 .\scripts\evaluate.ps1     # Windows (PowerShell)
 ```
 
-## Lo que enseñaron 24 horas de datos reales
+## Lo que enseñaron los datos reales
 
-La infraestructura aguantó sin tocarla: 29 horas seguidas, 6.055.107 mensajes en bronze con 0
-duplicados y 0 huecos, 3,6 millones de posiciones, unos 3.000 checkpoints y ninguno fallido.
+La infraestructura aguantó sin tocarla: en total, 11.722.237 mensajes en bronze con 0 duplicados
+y 0 huecos, y unos 3.000 checkpoints por día sin ningún fallo.
 
-Las reglas, en cambio, pasaban la evaluación sintética y aun así hacían ruido con datos reales.
-Esto es lo que mostró el primer día completo y lo que se cambió (job `-v6`):
+Las reglas, en cambio, pasaban la evaluación sintética y aun así hacían ruido con datos reales. El
+primer día completo mostró por qué; se corrigieron (job `-v6`) y se midió otro día completo con las
+reglas nuevas, sobre el mismo tráfico (unos 3.000 mensajes por minuto):
 
-| Regla | Con datos reales (24 h) | Por qué | Cambio |
-|---|---|---|---|
-| `dark_gap` | 3.727 barcos | La mayoría reaparecía a 0,0 km de donde se apagó: barcos atracados o fondeados que apagan el AIS | Tiene que reaparecer a 2 km o más |
-| `cable_loitering` | 3.602 alertas para 147 barcos | Cada ventana de 30 min volvía a alertar mientras el barco seguía ahí | Una alerta por episodio (6 h) |
-| `sts_encounter` | 1.312 barcos | Contaba cualquier par de barcos parados juntos, aunque ninguno fuera petrolero; además, alertaba cada 2 h por par | Al menos un petrolero en el par, y una alerta por episodio |
-| `identity_change` | 10 barcos | Antes, un barco alternaba "VLI-25 CINDY" y "CINDY VLI-25" | El nombre se compara sin orden de palabras (`-v5`) |
+| Regla | Antes (24 h) | Después (24 h, `-v6`) | Por qué hacía ruido | Cambio |
+|---|---|---|---|---|
+| Todas | ~17.000 alertas | ~2.100 alertas (−88 %) | | |
+| `dark_gap` | 3.727 barcos | 1.399 barcos (−62 %) | La mayoría reaparecía a 0,0 km de donde se apagó: barcos atracados o fondeados que apagan el AIS | Tiene que reaparecer a 2 km o más |
+| `sts_encounter` | 1.312 barcos | 69 barcos (−95 %) | Contaba cualquier par de barcos parados juntos, aunque ninguno fuera petrolero, y alertaba cada 2 h por par | Al menos un petrolero en el par, y una alerta por episodio |
+| `cable_loitering` | ~25 alertas por barco | ~1 alerta por barco (61 para 57) | Cada ventana de 30 min volvía a alertar mientras el barco seguía ahí | Una alerta por episodio (6 h) |
+| `identity_change` | un barco alternando "VLI-25 CINDY" / "CINDY VLI-25" | 12 barcos, sin ese caso | El orden de las palabras del nombre contaba como otro nombre | El nombre se compara sin orden de palabras (`-v5`) |
+
+`spoofing_jump` (137 → 174 barcos) y `sanctioned_vessel` no se tocaron; varían con el tráfico del día.
 
 Cada cambio tiene su negativo difícil en la evaluación ("reaparece en el mismo sitio", "dos
 cargueros"), así que una regresión se ve en la siguiente corrida.
@@ -267,6 +271,10 @@ El código se escribió con [Claude Code](https://claude.com/claude-code) como a
   apagón ahí no se puede distinguir de falta de cobertura (por eso la regla lo exige).
 - **Zonas aproximadas:** los trazados de cables y las zonas de puerto son de pocos puntos. Un
   trasvase dentro de un fondeadero concurrido tampoco alerta, por el filtro de densidad.
+- **Apagones por cobertura:** la cobertura se mira solo en la zona donde el barco se apagó. Un barco
+  que sale del alcance de los receptores y reaparece decenas de kilómetros más allá unas horas
+  después alerta igual, aunque solo haya cruzado un hueco de cobertura. Muchos de los apagones que
+  quedan tienen esa forma; el siguiente paso sería exigir cobertura también a lo largo de la ruta.
 - **Evaluación sintética:** el 100 % mide que cada regla hace lo que dice sobre casos construidos,
   no su precisión en el mundo real, donde no hay etiquetas.
 - **Un solo nodo:** todo corre en Docker en un PC. Flink, Redpanda y el catálogo (SQLite) tienen
