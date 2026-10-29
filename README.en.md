@@ -13,9 +13,9 @@ shows it on a map, with metrics that prove the alerts work.
 | Exactly-once | 0 duplicates and 0 gaps per Kafka offset in bronze, even after killing Flink mid-stream ([chaos test](#exactly-once-and-chaos-test)) |
 | Detections | 6 streaming rules: spoofing, dark gaps, encounters at sea, loitering over undersea cables, sanctioned vessels and identity changes |
 | Precision / recall | 100 % / 100 % on all 6 rules over 150 labelled vessels (positives and hard negatives) ([evaluation](#evaluation-precision-and-recall)) |
-| Real data | Live Baltic and North Sea traffic: about 3,000 AIS messages per minute on a 16 GB PC. Over 29 hours straight: 6,055,107 messages, 0 duplicates, 0 gaps, about 3,000 checkpoints and none failed ([lessons](#what-24-hours-of-real-data-taught)) |
+| Real data | Live Baltic and North Sea traffic: about 3,000 AIS messages per minute on a 16 GB PC. 11,722,237 messages in bronze with 0 duplicates and 0 gaps, about 3,000 checkpoints a day with no failures, and 88 % fewer alerts after tuning the rules on a day of real data ([before and after](#what-real-data-taught)) |
 
-![Grafana dashboard with 24 hours of real Baltic and North Sea data: alert map, H3 coverage, alerts by type and pipeline health](docs/grafana.png)
+![Grafana dashboard with 24 hours of real Baltic and North Sea data (rules -v6): alert map, H3 coverage, alerts by type and pipeline health](docs/grafana.png)
 
 ![Chaos test: the TaskManager is killed, Flink resumes from its checkpoint and the bronze table ends with no duplicates or gaps](docs/chaos_test.gif)
 
@@ -192,20 +192,24 @@ always right on real data.
 To run it (with the stack up; about 15 minutes, real data untouched): `./scripts/evaluate.sh` or
 `.\scripts\evaluate.ps1` on Windows.
 
-## What 24 hours of real data taught
+## What real data taught
 
-The infrastructure held up untouched: 29 hours straight, 6,055,107 messages in bronze with 0
-duplicates and 0 gaps, 3.6 million positions, about 3,000 checkpoints and none failed.
+The infrastructure held up untouched: 11,722,237 messages in bronze overall with 0 duplicates and
+0 gaps, and about 3,000 checkpoints a day with no failures.
 
-The rules, however, passed the synthetic evaluation and were still noisy on real data. This is what
-the first full day showed and what changed (job `-v6`):
+The rules, however, passed the synthetic evaluation and were still noisy on real data. The first
+full day showed why; the rules were fixed (job `-v6`) and measured over another full day on the
+same traffic (about 3,000 messages per minute):
 
-| Rule | On real data (24 h) | Why | Change |
-|---|---|---|---|
-| `dark_gap` | 3,727 vessels | Most reappeared 0.0 km from where they went dark: moored or anchored ships switching AIS off | Must reappear 2 km or more away |
-| `cable_loitering` | 3,602 alerts for 147 vessels | Every 30 min window alerted again while the vessel stayed | One alert per episode (6 h) |
-| `sts_encounter` | 1,312 vessels | Any two vessels idling together counted, even with no tanker involved; plus one alert every 2 h per pair | At least one tanker in the pair, and one alert per episode |
-| `identity_change` | 10 vessels | One vessel used to alternate "VLI-25 CINDY" and "CINDY VLI-25" | Names compared ignoring word order (`-v5`) |
+| Rule | Before (24 h) | After (24 h, `-v6`) | Why it was noisy | Change |
+|---|---|---|---|---|
+| All | ~17,000 alerts | ~2,100 alerts (−88 %) | | |
+| `dark_gap` | 3,727 vessels | 1,399 vessels (−62 %) | Most reappeared 0.0 km from where they went dark: moored or anchored ships switching AIS off | Must reappear 2 km or more away |
+| `sts_encounter` | 1,312 vessels | 69 vessels (−95 %) | Any two vessels idling together counted, even with no tanker, and each pair alerted every 2 h | At least one tanker in the pair, and one alert per episode |
+| `cable_loitering` | ~25 alerts per vessel | ~1 alert per vessel (61 for 57) | Every 30 min window alerted again while the vessel stayed | One alert per episode (6 h) |
+| `identity_change` | one vessel alternating "VLI-25 CINDY" / "CINDY VLI-25" | 12 vessels, without that case | Word order in the name counted as a different name | Names compared ignoring word order (`-v5`) |
+
+`spoofing_jump` (137 → 174 vessels) and `sanctioned_vessel` weren't changed; they vary with the day's traffic.
 
 Each change has its own hard negative in the evaluation ("reappears in the same spot", "two cargo
 ships"), so a regression shows up in the next run.
@@ -239,6 +243,10 @@ The code was written with [Claude Code](https://claude.com/claude-code) as an as
   a dark gap there can't be told apart from missing coverage (which is why the rule requires it).
 - **Approximate zones:** cable routes and port zones use few points. A transfer inside a busy
   anchorage doesn't alert either, because of the density filter.
+- **Gaps from coverage:** coverage is only checked in the zone where the vessel went dark. A vessel
+  that sails out of receiver range and reappears tens of kilometres further on a few hours later
+  still alerts, even if it only crossed a coverage hole. Many of the remaining dark gaps look like
+  that; the next step would be to require coverage along the route too.
 - **Synthetic evaluation:** the 100 % measures that each rule does what it says on constructed cases,
   not real-world precision, where there are no labels.
 - **Single node:** everything runs in Docker on one PC. Flink, Redpanda and the catalog (SQLite) run
